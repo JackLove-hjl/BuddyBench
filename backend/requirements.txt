@@ -1,0 +1,14 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+sqlalchemy[asyncio]>=2.0.51
+asyncpg>=0.30
+alembic>=1.14
+pydantic-settings>=2.4
+langchain-core>=1.4
+langchain-openai>=1.4
+langgraph>=1.2
+langgraph-checkpoint-postgres>=3.1.1
+psycopg[binary]>=3.3
+matplotlib>=3.9
+psutil>=6
+python-multipart>=0.0.9

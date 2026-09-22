@@ -1,0 +1,220 @@
+/* Markdown 渲染样式(双主题,基于 CSS 变量) */
+
+.md-body {
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
+
+.md-body > :first-child {
+  margin-top: 0;
+}
+.md-body > :last-child {
+  margin-bottom: 0;
+}
+
+.md-body p {
+  margin: 0.5em 0;
+}
+
+.md-body h1,
+.md-body h2,
+.md-body h3,
+.md-body h4,
+.md-body h5,
+.md-body h6 {
+  margin: 1em 0 0.5em;
+  font-weight: 600;
+  line-height: 1.35;
+}
+.md-body h1 {
+  font-size: 1.4em;
+}
+.md-body h2 {
+  font-size: 1.25em;
+}
+.md-body h3 {
+  font-size: 1.1em;
+}
+.md-body h4 {
+  font-size: 1em;
+}
+
+.md-body ul,
+.md-body ol {
+  margin: 0.5em 0;
+  padding-left: 1.6em;
+}
+.md-body li {
+  margin: 0.25em 0;
+}
+
+.md-body blockquote {
+  margin: 0.75em 0;
+  padding: 0.25em 1em;
+  border-left: 3px solid var(--border-strong);
+  color: var(--text-secondary);
+  background: var(--bg-reasoning);
+  border-radius: 0 6px 6px 0;
+}
+
+.md-body code {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 0.88em;
+  padding: 0.15em 0.4em;
+  background: var(--bg-code);
+  border-radius: 4px;
+}
+
+.md-body pre {
+  margin: 0.75em 0;
+  padding: 0.9em 1em;
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow-x: auto;
+  line-height: 1.5;
+}
+.md-body pre code {
+  display: block;
+  padding: 0;
+  background: transparent;
+  font-size: 0.88em;
+  white-space: pre;
+  color: var(--text);
+}
+.md-body pre .hljs {
+  background: transparent;
+  padding: 0;
+}
+
+/* 代码高亮(hljs,双主题) */
+.hljs-comment,
+.hljs-quote {
+  color: #6a737d;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-subst {
+  color: #d73a49;
+}
+.hljs-number,
+.hljs-literal,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-tag .hljs-attr {
+  color: #005cc5;
+}
+.hljs-string,
+.hljs-doctag {
+  color: #032f62;
+}
+.hljs-title,
+.hljs-section,
+.hljs-selector-id {
+  color: #6f42c1;
+  font-weight: 600;
+}
+.hljs-type,
+.hljs-class .hljs-title,
+.hljs-built_in {
+  color: #005cc5;
+}
+.hljs-attr,
+.hljs-attribute,
+.hljs-name,
+.hljs-params {
+  color: #24292e;
+}
+.hljs-symbol,
+.hljs-bullet,
+.hljs-link,
+.hljs-meta {
+  color: #005cc5;
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 600;
+}
+.hljs-addition {
+  background: #e6ffec;
+}
+.hljs-deletion {
+  background: #ffebe9;
+}
+
+html[data-theme='dark'] .hljs-comment,
+html[data-theme='dark'] .hljs-quote {
+  color: #8b949e;
+}
+html[data-theme='dark'] .hljs-keyword,
+html[data-theme='dark'] .hljs-selector-tag,
+html[data-theme='dark'] .hljs-subst {
+  color: #ff7b72;
+}
+html[data-theme='dark'] .hljs-number,
+html[data-theme='dark'] .hljs-literal,
+html[data-theme='dark'] .hljs-variable,
+html[data-theme='dark'] .hljs-template-variable,
+html[data-theme='dark'] .hljs-tag .hljs-attr {
+  color: #79c0ff;
+}
+html[data-theme='dark'] .hljs-string,
+html[data-theme='dark'] .hljs-doctag {
+  color: #a5d6ff;
+}
+html[data-theme='dark'] .hljs-title,
+html[data-theme='dark'] .hljs-section,
+html[data-theme='dark'] .hljs-selector-id {
+  color: #d2a8ff;
+}
+html[data-theme='dark'] .hljs-type,
+html[data-theme='dark'] .hljs-class .hljs-title,
+html[data-theme='dark'] .hljs-built_in {
+  color: #79c0ff;
+}
+html[data-theme='dark'] .hljs-attr,
+html[data-theme='dark'] .hljs-attribute,
+html[data-theme='dark'] .hljs-name,
+html[data-theme='dark'] .hljs-params {
+  color: #c9d1d9;
+}
+html[data-theme='dark'] .hljs-symbol,
+html[data-theme='dark'] .hljs-bullet,
+html[data-theme='dark'] .hljs-link,
+html[data-theme='dark'] .hljs-meta {
+  color: #79c0ff;
+}
+
+/* 表格 */
+.md-body table {
+  border-collapse: collapse;
+  margin: 0.75em 0;
+  width: 100%;
+  font-size: 0.95em;
+}
+.md-body th,
+.md-body td {
+  border: 1px solid var(--border);
+  padding: 0.45em 0.75em;
+  text-align: left;
+}
+.md-body th {
+  background: var(--bg-reasoning);
+  font-weight: 600;
+}
+
+/* 图片 */
+.md-body img {
+  max-width: 100%;
+  border-radius: 8px;
+  margin: 0.5em 0;
+  display: block;
+}
+
+.md-body hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1em 0;
+}

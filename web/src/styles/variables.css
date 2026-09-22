@@ -1,0 +1,52 @@
+/* 双主题 CSS 变量(亮/暗),html[data-theme] 控制 */
+:root {
+  --bg: #ffffff;
+  --bg-sidebar: #f7f7f8;
+  --bg-elevated: #ffffff;
+  --bg-hover: #f0f0f2;
+  --bg-active: #e9e9ec;
+  --bg-code: #f5f5f7;
+  --bg-reasoning: #f7f7f8;
+  --text: #1f2329;
+  --text-secondary: #6b7280;
+  --text-tertiary: #9ca3af;
+  --border: #e5e6eb;
+  --border-strong: #d0d3d9;
+  --accent: #4d6bfe;
+  --accent-hover: #3d5afe;
+  --accent-soft: rgba(77, 107, 254, 0.1);
+  --danger: #d43d3d;
+  --danger-soft: rgba(212, 61, 61, 0.08);
+  --success: #22a06b;
+  /* 用户消息气泡:浅色背景 + 深色文字(与选中色 --accent-soft 淡蓝区分) */
+  --user-bubble: #f0f1f3;
+  --user-bubble-text: #1f2329;
+  --shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
+  --scrollbar: rgba(0, 0, 0, 0.18);
+}
+
+html[data-theme='dark'] {
+  --bg: #1a1a1a;
+  --bg-sidebar: #202020;
+  --bg-elevated: #262626;
+  --bg-hover: #2f2f2f;
+  --bg-active: #363636;
+  --bg-code: #2a2a2a;
+  --bg-reasoning: #242424;
+  --text: #f2f3f5;
+  --text-secondary: #a0a4ab;
+  --text-tertiary: #6e737b;
+  --border: #333333;
+  --border-strong: #4a4a4a;
+  --accent: #6c86ff;
+  --accent-hover: #7d94ff;
+  --accent-soft: rgba(108, 134, 255, 0.16);
+  --danger: #f0645c;
+  --danger-soft: rgba(240, 100, 92, 0.14);
+  --success: #3ecf8e;
+  /* 用户消息气泡:暗色下用比背景略亮的灰 */
+  --user-bubble: #2f2f2f;
+  --user-bubble-text: #f2f3f5;
+  --shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  --scrollbar: rgba(255, 255, 255, 0.2);
+}

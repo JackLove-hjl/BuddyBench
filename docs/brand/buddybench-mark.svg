@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="#4D6BFE" role="img" aria-label="BuddyBench">
+  <!-- Buddy:对话气泡,三个点是 fill-rule=evenodd 掏空的(而非叠色),小尺寸下不糊 -->
+  <path
+    fill-rule="evenodd"
+    d="M23 5h18a11 11 0 0 1 11 11v12a11 11 0 0 1-11 11h-6l-3 7-3-7h-6a11 11 0 0 1-11-11V16a11 11 0 0 1 11-11z M24 19a3 3 0 1 0 0 6a3 3 0 0 0 0-6z M32 19a3 3 0 1 0 0 6a3 3 0 0 0 0-6z M40 19a3 3 0 1 0 0 6a3 3 0 0 0 0-6z"
+  />
+  <!-- Bench:凳面与两条凳腿,气泡尾巴落在凳面上 -->
+  <rect x="6" y="43" width="52" height="7" rx="3.5" />
+  <rect x="14" y="50" width="7" height="9" rx="3.5" />
+  <rect x="43" y="50" width="7" height="9" rx="3.5" />
+</svg>

@@ -1,0 +1,21 @@
+<!-- BuddyBench lockup:主标识 + 字标。主色固定为品牌蓝,浅色/暗色文档里都可见;
+     需要改色直接改 root 的 fill;内联到 HTML/CSS 时可换成 currentColor -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 248 64" fill="#4D6BFE" role="img" aria-label="BuddyBench">
+  <g transform="translate(0 5) scale(0.85)">
+    <path
+      fill-rule="evenodd"
+      d="M23 5h18a11 11 0 0 1 11 11v12a11 11 0 0 1-11 11h-6l-3 7-3-7h-6a11 11 0 0 1-11-11V16a11 11 0 0 1 11-11z M24 19a3 3 0 1 0 0 6a3 3 0 0 0 0-6z M32 19a3 3 0 1 0 0 6a3 3 0 0 0 0-6z M40 19a3 3 0 1 0 0 6a3 3 0 0 0 0-6z"
+    />
+    <rect x="6" y="43" width="52" height="7" rx="3.5" />
+    <rect x="14" y="50" width="7" height="9" rx="3.5" />
+    <rect x="43" y="50" width="7" height="9" rx="3.5" />
+  </g>
+  <text
+    x="64"
+    y="42"
+    font-family="system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+    font-size="30"
+    font-weight="700"
+    letter-spacing="-0.6"
+  >BuddyBench</text>
+</svg>
