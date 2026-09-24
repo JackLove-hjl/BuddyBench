@@ -37,6 +37,21 @@ export function useAutoScroll(containerRef: () => HTMLElement | null) {
     el.scrollTo({ top: el.scrollHeight, behavior: force ? 'smooth' : 'auto' })
   }
 
+  /**
+   * 直接贴底(无动画,并把「跟随底部」重新打开)。
+   *
+   * 用于「整屏内容被替换」的场景 —— 切换会话、刷新页面:这时平滑滚动没有意义,
+   * 内容随后还会因为图片异步加载、长文重排继续变高,动画停在半路,用户看到的就是"没到底"。
+   * 贴底之后 stickToBottom 为 true,后续的高度变化会被调用方继续跟随(见 MessageList 的 ResizeObserver)。
+   */
+  async function jumpToBottom() {
+    const el = getEl()
+    if (!el) return
+    stickToBottom.value = true
+    await nextTick()
+    el.scrollTop = el.scrollHeight
+  }
+
   onMounted(() => {
     const el = getEl()
     if (el) {
@@ -52,5 +67,5 @@ export function useAutoScroll(containerRef: () => HTMLElement | null) {
     }
   })
 
-  return { showScrollBtn, scrollToBottom }
+  return { showScrollBtn, stickToBottom, scrollToBottom, jumpToBottom }
 }

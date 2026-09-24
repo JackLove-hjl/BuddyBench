@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import { NButton } from 'naive-ui'
 import { useConversationStore } from '../../stores/conversation'
+import { highlightCode } from '../../utils/highlight'
 import type { ApprovalAction } from '../../types'
 import MarkdownContent from './MarkdownContent.vue'
 
@@ -27,6 +28,22 @@ const planText = computed(() => {
 })
 const isPlanReview = computed(() => planText.value !== '')
 
+/**
+ * 默认展开/折叠按卡片类型区分:
+ * - **计划评审默认展开**:计划必须读了才能批准,折叠着反而多一步;
+ * - **危险操作审批默认折叠**:计划全文 / 工具参数都可能很长,展开会把输入框挤出视口,
+ *   待批准的工具名在标题里仍然可见,「批准 / 拒绝」按钮也始终可点。
+ */
+const collapsed = ref(!isPlanReview.value)
+
+/** 折叠时也要让用户知道在批准什么:把待批准的工具名贴在标题右侧 */
+const actionNames = computed(() =>
+  props.actions
+    .filter((a) => a.name !== 'exit_plan_mode')
+    .map((a) => a.name)
+    .join(' · '),
+)
+
 async function decide(type: 'approve' | 'reject') {
   if (busy.value) return
   busy.value = type
@@ -46,27 +63,46 @@ function argsText(action: ApprovalAction): string {
     return String(action.args)
   }
 }
+
+/** 参数按 JSON 着色;截断后的片段 hljs 仍能正常着色已解析的前缀 */
+function argsHtml(action: ApprovalAction): string {
+  return highlightCode(argsText(action), 'json', false)
+}
 </script>
 
 <template>
   <div class="approval-card">
-    <div class="approval-head">
+    <button type="button" class="approval-head" @click="collapsed = !collapsed">
       <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" class="approval-icon">
         <path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM8 3a5 5 0 1 1 0 10A5 5 0 0 1 8 3zM7.4 5.5h1.2v4H7.4v-4zm0 5h1.2v1.2H7.4V10.5z" />
       </svg>
       <span class="approval-title">{{ isPlanReview ? '计划已就绪,等待你确认' : '需要你确认后才会执行' }}</span>
-    </div>
+      <span v-if="!isPlanReview && actionNames" class="approval-tools">{{ actionNames }}</span>
+      <svg
+        class="approval-chevron"
+        :class="{ collapsed }"
+        viewBox="0 0 12 12"
+        width="11"
+        height="11"
+        fill="none"
+      >
+        <path d="M2 4.5l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+      </svg>
+    </button>
 
-    <!-- 计划评审:按 Markdown 渲染完整计划,而不是把它塞进 JSON 代码块 -->
-    <div v-if="isPlanReview" class="approval-plan">
-      <MarkdownContent :content="planText" />
-    </div>
-
-    <template v-else>
-      <div v-for="(action, i) in props.actions" :key="i" class="approval-action">
-        <div class="approval-name">{{ action.name }}</div>
-        <pre v-if="argsText(action)" class="approval-args">{{ argsText(action) }}</pre>
+    <template v-if="!collapsed">
+      <!-- 计划评审:按 Markdown 渲染完整计划,而不是把它塞进 JSON 代码块 -->
+      <div v-if="isPlanReview" class="approval-plan">
+        <MarkdownContent :content="planText" />
       </div>
+
+      <template v-else>
+        <div v-for="(action, i) in props.actions" :key="i" class="approval-action">
+          <div class="approval-name">{{ action.name }}</div>
+          <!-- eslint-disable-next-line vue/no-v-html -- hljs 输出已转义,见 utils/highlight.ts -->
+          <pre v-if="argsText(action)" class="approval-args" v-html="argsHtml(action)"></pre>
+        </div>
+      </template>
     </template>
 
     <div v-if="isPlanReview" class="approval-feedback">
@@ -101,14 +137,44 @@ function argsText(action: ApprovalAction): string {
   display: flex;
   align-items: center;
   gap: 8px;
+  width: 100%;
+  box-sizing: border-box;
   padding: 8px 12px;
+  border: none;
   background: var(--accent-soft);
   color: var(--accent);
+  font-family: inherit;
   font-size: 13px;
   font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.approval-head:hover {
+  background: var(--bg-hover);
 }
 .approval-icon {
   flex-shrink: 0;
+}
+.approval-title {
+  flex-shrink: 0;
+}
+/* 折叠状态下也要看得见"在批准什么" */
+.approval-tools {
+  margin-left: auto;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.approval-chevron {
+  flex-shrink: 0;
+  transition: transform 0.15s;
+}
+.approval-chevron.collapsed {
+  transform: rotate(-90deg);
 }
 .approval-action {
   padding: 8px 12px;

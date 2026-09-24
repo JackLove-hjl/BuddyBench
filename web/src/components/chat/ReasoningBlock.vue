@@ -1,21 +1,38 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { nextTick, ref, watch } from 'vue'
 
 const props = defineProps<{
   content: string
   streaming: boolean
 }>()
 
-// 流式进行中实时展开思考过程;回答完毕后自动折叠;
-// 历史消息(非流式)与切换对话后默认折叠
+/**
+ * 默认折叠(流式期间也不自动展开)。
+ *
+ * 思考内容动辄几千字,自动展开会把整屏占满,外层消息列表还会被一路推着滚 ——
+ * 想看时点开即可;展开状态下自动跟随最新一行,用户往上翻后就不再打扰。
+ */
 const expanded = ref(false)
-watch(
-  () => props.streaming,
-  (v) => {
-    expanded.value = v
-  },
-  { immediate: true },
-)
+const contentEl = ref<HTMLElement | null>(null)
+
+/** 贴底时才跟随:用户手动往上翻(离底超过阈值)就停止,避免把他的阅读位置拽走 */
+function followTail() {
+  const el = contentEl.value
+  if (!el || !expanded.value) return
+  if (el.scrollHeight - el.scrollTop - el.clientHeight > 60) return
+  el.scrollTop = el.scrollHeight
+}
+
+watch(() => props.content, followTail)
+
+// 刚展开时直接落到最新一行:首次展开离底很远,followTail 的贴底判断不会生效
+watch(expanded, (v) => {
+  if (!v) return
+  void nextTick(() => {
+    const el = contentEl.value
+    if (el) el.scrollTop = el.scrollHeight
+  })
+})
 </script>
 
 <template>
@@ -36,7 +53,7 @@ watch(
         <path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round" />
       </svg>
     </button>
-    <div v-if="expanded" class="reasoning-content">{{ content }}</div>
+    <div v-if="expanded" ref="contentEl" class="reasoning-content">{{ content }}</div>
   </div>
 </template>
 
@@ -88,5 +105,10 @@ watch(
   line-height: 1.7;
   white-space: pre-wrap;
   word-break: break-word;
+  /* 思考可能几千字:限高 + 内部滚动,别把消息流顶走 */
+  max-height: 240px;
+  overflow-y: auto;
+  /* 滚到上下边界时不把滚动传递给外层消息列表 */
+  overscroll-behavior: contain;
 }
 </style>

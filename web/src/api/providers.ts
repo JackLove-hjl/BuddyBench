@@ -7,6 +7,12 @@ export interface ProviderModelItem {
   input_tokens?: number | null
   /** 最大输出 token 数 */
   output_tokens?: number | null
+  /**
+   * 思考强度(low / medium / high …),随请求下发 `reasoning_effort`。
+   * 留空表示不下发:部分平台的 fast 模型默认不思考(返回的 reasoning_content 恒为 null),
+   * 必须显式给强度才会输出思考过程;反过来,不支持的端点遇到该参数可能直接 400。
+   */
+  reasoning_effort?: string | null
 }
 
 export interface ProviderInfo {

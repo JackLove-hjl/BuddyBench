@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useConversationStore } from '../../stores/conversation'
 import { useAutoScroll } from '../../composables/useAutoScroll'
 import UserMessage from './UserMessage.vue'
@@ -9,7 +9,21 @@ import BrandLogo from '../common/BrandLogo.vue'
 
 const convStore = useConversationStore()
 const container = ref<HTMLElement | null>(null)
-const { showScrollBtn, scrollToBottom } = useAutoScroll(() => container.value)
+const content = ref<HTMLElement | null>(null)
+const { showScrollBtn, scrollToBottom, jumpToBottom } = useAutoScroll(() => container.value)
+
+// 切换会话:currentId 一变就贴底(此时还是 loading 态,真正的贴底靠下面的 loading 下落)
+watch(
+  () => convStore.currentId,
+  () => void jumpToBottom(),
+)
+// 加载完成(消息已渲染):再贴一次,这次才是有内容的底
+watch(
+  () => convStore.loading,
+  (loading) => {
+    if (!loading) void jumpToBottom()
+  },
+)
 
 watch(
   () => convStore.pending?.content,
@@ -27,10 +41,27 @@ watch(
   () => convStore.pending?.images.length,
   () => void scrollToBottom(),
 )
+// 本会话新增消息(用户刚发出 / 助手回复固化):平滑滚到底,让新内容自然进入视野
 watch(
   () => convStore.messages.length,
   () => void scrollToBottom(true),
 )
+
+/**
+ * 内容高度变化时继续贴住底部。
+ *
+ * 「切换会话已到底」会被随后才加载完成的图片顶上去 —— 图片没有内在尺寸,加载完才撑开高度,
+ * 而此时滚动早已执行完毕。用 ResizeObserver 盯住内容高度:只要用户仍然停在底部
+ * (stickToBottom,滚动时会自动更新)就跟到底;用户主动往上翻后就不再打扰。
+ */
+const resizeObserver = new ResizeObserver(() => {
+  if (!convStore.loading) void scrollToBottom()
+})
+watch(content, (el, prev) => {
+  if (prev) resizeObserver.unobserve(prev)
+  if (el) resizeObserver.observe(el)
+})
+onBeforeUnmount(() => resizeObserver.disconnect())
 
 // 切换会话时 messages 会先被清空再加载,这里把 loading 一并纳入判断,
 // 否则加载期间会闪出"欢迎"空态
@@ -71,10 +102,15 @@ function onRetry() {
     </div>
 
     <template v-else>
-      <div class="message-container">
-        <template v-for="m in convStore.messages" :key="m.id">
+      <div ref="content" class="message-container">
+        <template v-for="(m, i) in convStore.messages" :key="m.id">
           <UserMessage v-if="m.role === 'user'" :content="m.content" :attachments="m.meta.attachments" />
-          <AssistantMessage v-else :message="m" @retry="onRetry" />
+          <AssistantMessage
+            v-else
+            :message="m"
+            :is-last="i === convStore.messages.length - 1"
+            @retry="onRetry"
+          />
         </template>
         <AssistantMessage v-if="convStore.pending" :pending="convStore.pending" @retry="onRetry" />
       </div>

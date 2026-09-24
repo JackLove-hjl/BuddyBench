@@ -16,6 +16,12 @@ class ProviderModelItem(BaseModel):
     display_name: str | None = None
     input_tokens: int | None = Field(default=None, gt=0, description="输入上下文上限")
     output_tokens: int | None = Field(default=None, gt=0, description="最大输出 token 数")
+    reasoning_effort: str | None = Field(
+        default=None,
+        max_length=50,
+        description="思考强度(low/medium/high 等)。留空 = 不下发该参数;"
+        "只对支持它的模型填写,否则端点可能直接 400",
+    )
 
 
 class ProviderCreate(BaseModel):

@@ -19,8 +19,16 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _has_column(name: str) -> bool:
+    """检查列是否已存在:兼容早期手工建列 / 迁移顺序调整导致的 schema 漂移。"""
+    bind = op.get_bind()
+    return name in {c["name"] for c in sa.inspect(bind).get_columns('conversations')}
+
+
 def upgrade() -> None:
     """Upgrade schema."""
+    if _has_column('pinned'):
+        return
     op.add_column(
         'conversations',
         sa.Column('pinned', sa.Boolean(), nullable=False, server_default=sa.false()),
@@ -29,4 +37,6 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Downgrade schema."""
+    if not _has_column('pinned'):
+        return
     op.drop_column('conversations', 'pinned')

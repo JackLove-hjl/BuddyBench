@@ -1,11 +1,17 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { useCodeCopy } from '../../composables/useCodeCopy'
 import { resolveAssetUrl } from '../../utils/asset'
+import { COPY_LABEL } from '../../utils/clipboard'
 import { lineDiff } from '../../utils/diff'
+import { highlightCode, langFromPath } from '../../utils/highlight'
 import MarkdownContent from './MarkdownContent.vue'
 import type { ToolCall } from '../../types'
 
 const props = defineProps<{ call: ToolCall }>()
+
+// 代码块的一键复制(事件委托,挂在卡片根节点上)
+const { onCodeCopyClick } = useCodeCopy()
 
 /** args = 参数流阶段(还没执行,正在生成正文),start = 执行中,paused = 等人工批准,end = 已结束 */
 const streaming = computed(() => props.call.status === 'args')
@@ -92,35 +98,6 @@ const VERBS: Record<string, string> = {
   run_shell_command: '执行命令',
 }
 
-const LANG_BY_EXT: Record<string, string> = {
-  py: 'python',
-  ts: 'typescript',
-  tsx: 'tsx',
-  js: 'javascript',
-  jsx: 'jsx',
-  vue: 'html',
-  html: 'html',
-  css: 'css',
-  scss: 'scss',
-  json: 'json',
-  md: 'markdown',
-  yml: 'yaml',
-  yaml: 'yaml',
-  sh: 'bash',
-  ps1: 'powershell',
-  sql: 'sql',
-  rs: 'rust',
-  go: 'go',
-  java: 'java',
-  toml: 'ini',
-  ini: 'ini',
-}
-
-function langOf(path: string): string {
-  const ext = path.split('.').pop()?.toLowerCase() || ''
-  return LANG_BY_EXT[ext] || 'text'
-}
-
 /** 用比正文更长的围栏包住代码,避免内容里出现 ``` 时截断渲染 */
 function fenced(code: string, lang: string): string {
   const longest = (code.match(/`+/g) || []).reduce((m, s) => Math.max(m, s.length), 0)
@@ -128,9 +105,12 @@ function fenced(code: string, lang: string): string {
   return `${fence}${lang}\n${code}\n${fence}`
 }
 
+/** 当前代码的语言:优先按文件路径推断,推不出来时交给 hljs 自动探测 */
+const codeLang = computed(() => langFromPath(filePath.value))
+
 const codeMarkdown = computed(() => {
   const code = payload.value?.content
-  return code ? fenced(code, langOf(filePath.value)) : ''
+  return code ? fenced(code, codeLang.value) : ''
 })
 
 const diffLines = computed(() =>
@@ -139,7 +119,31 @@ const diffLines = computed(() =>
     : [],
 )
 
+/* ---------- 高亮 ---------- */
+
+/** diff 行数超过这个量级就不逐行跑 hljs:大 diff 下逐行解析会明显拖慢渲染 */
+const DIFF_HIGHLIGHT_MAX = 200
+
+/** 行级高亮:diff 按文件语言着色(逐行解析,跨行结构会退化,但阅读体验明显好于纯文本) */
+const diffRows = computed(() => {
+  const lang = codeLang.value
+  const canHighlight = diffLines.value.length <= DIFF_HIGHLIGHT_MAX
+  return diffLines.value.map((line) => ({
+    kind: line.kind,
+    text: line.text,
+    html: canHighlight ? highlightCode(line.text, lang, false) : '',
+  }))
+})
+
 const command = computed(() => payload.value?.command || argsPreview.value)
+
+/** 命令按 shell 着色(补回的 `$` 提示符一起交给 hljs,bare `$` 不会被误判) */
+const commandHtml = computed(() =>
+  command.value ? highlightCode(`$ ${command.value}`, 'bash', false) : '',
+)
+
+/** 参数摘要可能是命令 / 路径 / JSON 片段,语言未知 → 自动探测 */
+const previewHtml = computed(() => highlightCode(argsPreview.value, '', true))
 
 type BodyKind = 'none' | 'image' | 'code' | 'diff' | 'command' | 'preview'
 const bodyKind = computed<BodyKind>(() => {
@@ -173,10 +177,54 @@ watch(streamText, () => {
   const el = streamEl.value
   if (el) el.scrollTop = el.scrollHeight
 })
+
+/* ---------- 流式代码的高亮(节流) ----------
+ * token 增量到达非常密集,而 hljs 的耗时随已生成内容线性增长:
+ * 逐帧重跑会越写越卡。这里最多每 STREAM_HIGHLIGHT_MS 重跑一次,
+ * 并在状态切换(args → 执行/挂起)时立刻同步到最终内容。
+ */
+const STREAM_HIGHLIGHT_MS = 120
+
+const streamHtml = ref('')
+let streamTimer: number | null = null
+
+function syncStreamHtml() {
+  streamHtml.value = highlightCode(streamText.value, codeLang.value, false)
+}
+
+function cancelStreamTimer() {
+  if (streamTimer !== null) {
+    window.clearTimeout(streamTimer)
+    streamTimer = null
+  }
+}
+
+watch(streamText, () => {
+  if (props.call.status !== 'args') {
+    syncStreamHtml()
+    return
+  }
+  if (streamTimer !== null) return
+  streamTimer = window.setTimeout(() => {
+    streamTimer = null
+    syncStreamHtml()
+  }, STREAM_HIGHLIGHT_MS)
+})
+
+watch(
+  () => props.call.status,
+  () => {
+    cancelStreamTimer()
+    syncStreamHtml()
+  },
+  { immediate: true },
+)
+
+onBeforeUnmount(cancelStreamTimer)
 </script>
 
 <template>
-  <div class="tool-card" :class="{ running: running || streaming, failed }">
+  <div class="tool-card" :class="{ running: running || streaming, failed }" @click="onCodeCopyClick">
     <div class="tool-head" @click="showBody && (expanded = !expanded)">
       <svg v-if="running || streaming" viewBox="0 0 16 16" width="14" height="14" fill="currentColor" class="tool-spin">
         <path d="M8 2a6 6 0 1 0 6 6h-1.5A4.5 4.5 0 1 1 8 3.5V2z" />
@@ -205,10 +253,18 @@ watch(streamText, () => {
     </div>
 
     <div v-if="expanded">
-      <!-- 参数流:边生成边增长的代码(不重跑高亮,避免逐帧渲染开销) -->
-      <pre v-if="streaming" ref="streamEl" class="tool-code stream">{{ streamText }}</pre>
+      <!-- 参数流:边生成边增长的代码(高亮按 STREAM_HIGHLIGHT_MS 节流,避免逐帧重跑) -->
+      <div v-if="streaming" class="code-wrap">
+        <!-- eslint-disable-next-line vue/no-v-html -- hljs 输出已转义,见 utils/highlight.ts -->
+        <pre ref="streamEl" class="tool-code stream" v-html="streamHtml"></pre>
+        <button type="button" class="code-copy-btn">{{ COPY_LABEL }}</button>
+      </div>
       <!-- 已生成完毕、等人工批准:内容保留可审阅 -->
-      <pre v-else-if="paused" class="tool-code">{{ streamText }}</pre>
+      <div v-else-if="paused" class="code-wrap">
+        <!-- eslint-disable-next-line vue/no-v-html -- 同上 -->
+        <pre class="tool-code" v-html="streamHtml"></pre>
+        <button type="button" class="code-copy-btn">{{ COPY_LABEL }}</button>
+      </div>
 
       <template v-else>
         <div v-if="bodyKind === 'image'" class="tool-image">
@@ -219,9 +275,14 @@ watch(streamText, () => {
           <MarkdownContent :content="codeMarkdown" />
           <div v-if="payload?.truncated" class="tool-note">内容超过上限,仅展示前 64KB</div>
         </div>
-        <pre v-else-if="bodyKind === 'diff'" class="tool-diff"><span v-for="(line, i) in diffLines" :key="i" class="diff-line" :class="line.kind"><span class="diff-sign">{{ line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ' ' }}</span>{{ line.text }}</span></pre>
-        <pre v-else-if="bodyKind === 'command'" class="tool-code">$ {{ command }}</pre>
-        <pre v-else-if="bodyKind === 'preview'" class="tool-code">{{ argsPreview }}</pre>
+        <pre v-else-if="bodyKind === 'diff'" class="tool-diff"><span v-for="(line, i) in diffRows" :key="i" class="diff-line" :class="line.kind"><span class="diff-sign">{{ line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ' ' }}</span><!-- eslint-disable-next-line vue/no-v-html -- hljs 输出已转义 --><span v-if="line.html" v-html="line.html"></span><template v-else>{{ line.text }}</template></span></pre>
+        <div v-else-if="bodyKind === 'command'" class="code-wrap">
+          <!-- eslint-disable-next-line vue/no-v-html -- hljs 输出已转义 -->
+          <pre class="tool-code" :data-code="command" v-html="commandHtml"></pre>
+          <button type="button" class="code-copy-btn">{{ COPY_LABEL }}</button>
+        </div>
+        <!-- eslint-disable-next-line vue/no-v-html -- hljs 输出已转义 -->
+        <pre v-else-if="bodyKind === 'preview'" class="tool-code" v-html="previewHtml"></pre>
       </template>
 
       <pre v-if="hasStdout" class="tool-stdout">{{ stdout }}</pre>

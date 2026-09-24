@@ -1,0 +1,61 @@
+/* 代码块一键复制(Markdown 正文与工具卡共用同一套结构与样式) */
+
+/*
+ * 按钮必须在 <pre> 外面:代码块自身有 overflow-x: auto,放在里面会被裁掉。
+ * 所以统一用一层 .code-wrap 做定位参考。
+ */
+.code-wrap {
+  position: relative;
+}
+
+.code-copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 2px 8px;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s, border-color 0.15s;
+}
+
+/* 默认隐去,悬停代码块或键盘聚焦时才出现,不干扰阅读 */
+.code-wrap:hover .code-copy-btn,
+.code-copy-btn:focus-visible {
+  opacity: 1;
+}
+
+.code-copy-btn:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.code-copy-btn.done {
+  color: var(--success);
+  border-color: var(--success);
+  opacity: 1;
+}
+
+/* 触屏设备没有 hover,常显 */
+@media (hover: none) {
+  .code-copy-btn {
+    opacity: 1;
+  }
+}
+
+/*
+ * 首/尾代码块不留外边距:原本由 .md-body > :first-child 命中 pre,
+ * 现在中间多了一层 .code-wrap,靠这两条保持原来的贴边效果。
+ */
+.md-body > .code-wrap:first-child > pre {
+  margin-top: 0;
+}
+.md-body > .code-wrap:last-child > pre {
+  margin-bottom: 0;
+}

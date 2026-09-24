@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 import { NButton } from 'naive-ui'
 import { useConversationStore } from '../../stores/conversation'
 import type { ApprovalAction, AskUserQuestion } from '../../types'
 
 /**
- * 计划模式的需求澄清卡:模型用 ask_user 提问,这里渲染成「选择引导 + 自定义输入」。
+ * 计划模式的需求澄清卡:模型用 ask_user 提问,这里渲染成「逐题翻页 + 选择引导 + 自定义输入」。
  *
- * - 每题单选(选项按钮),或选「输入自定义回答…」后手写;
+ * - 一次只显示一题,点选项即作答并自动翻到下一题(自定义回答要先打字,不自动翻);
+ * - 顶部圆点可跳题,底部「上一题 / 下一题」可来回改;
  * - 页脚「完成」把答案回传,「跳过」表示授权模型自行决定(它要在计划里写明假设);
  * - 答案走 HITL 的 `respond` 决策作为工具结果回到模型 —— 与审批卡共用同一套中断/恢复链路,
  *   所以挂起标记落在 meta.pending_approval 里,刷新后仍能作答。
@@ -17,6 +18,8 @@ const props = defineProps<{ actions: ApprovalAction[] }>()
 const convStore = useConversationStore()
 const submitting = ref(false)
 const collapsed = ref(false)
+/** 当前显示第几题(一次只渲染一题) */
+const current = ref(0)
 /** 每题选中的下标;等于选项个数时表示"自定义回答" */
 const picked = ref<Record<number, number>>({})
 const custom = ref<Record<number, string>>({})
@@ -41,20 +44,37 @@ const questions = computed<AskUserQuestion[]>(() => {
 /** 「自定义回答」在选项里的位置(排在预设选项之后) */
 const customIndex = (q: AskUserQuestion) => q.options?.length || 0
 
-const answeredCount = computed(
-  () =>
-    questions.value.filter((q, i) => {
-      const p = picked.value[i]
-      if (p === undefined) return false
-      if (p === customIndex(q)) return !!custom.value[i]?.trim()
-      return true
-    }).length,
-)
+/** 防越界:问题列表理论上不变,但防御一下空数组/越界下标 */
+const index = computed(() => Math.min(current.value, questions.value.length - 1))
+const question = computed(() => questions.value[index.value])
+
+const customEl = ref<HTMLTextAreaElement | null>(null)
+
+function isAnswered(i: number): boolean {
+  const q = questions.value[i]
+  if (!q) return false
+  const p = picked.value[i]
+  if (p === undefined) return false
+  if (p === customIndex(q)) return !!custom.value[i]?.trim()
+  return true
+}
+
+const answeredCount = computed(() => questions.value.filter((_, i) => isAnswered(i)).length)
+
+function goto(i: number) {
+  current.value = Math.max(0, Math.min(i, questions.value.length - 1))
+}
 
 function pick(qi: number, oi: number, q: AskUserQuestion) {
   picked.value[qi] = oi
-  // 选中自定义项时准备好输入框的值,避免 v-model 拿到 undefined
-  if (oi === customIndex(q) && custom.value[qi] === undefined) custom.value[qi] = ''
+  // 选中自定义项时准备好输入框的值并聚焦 —— 要先打字,所以不自动翻页
+  if (oi === customIndex(q)) {
+    if (custom.value[qi] === undefined) custom.value[qi] = ''
+    void nextTick(() => customEl.value?.focus())
+    return
+  }
+  // 点选项即作答,自动进入下一题;已是最后一题就停在原地(「完成」就在下面)
+  if (qi < questions.value.length - 1) goto(qi + 1)
 }
 
 function answerText(q: AskUserQuestion, i: number): string {
@@ -105,43 +125,72 @@ async function submit(skipped: boolean) {
       </svg>
     </button>
 
-    <template v-if="!collapsed">
-      <div v-for="(q, i) in questions" :key="i" class="question-item">
-        <div class="question-text">{{ i + 1 }}. {{ q.question }}</div>
-
+    <div v-if="!collapsed && question" class="question-body">
+      <!-- 进度:圆点可跳题,右侧显示 当前/总数 -->
+      <div class="question-progress">
         <button
-          v-for="(opt, oi) in q.options"
-          :key="oi"
-          class="question-option"
-          :class="{ picked: picked[i] === oi }"
-          @click="pick(i, oi, q)"
-        >
-          <span class="question-letter">{{ LETTERS[oi] }}</span>
-          <span class="question-opt-main">
-            <span class="question-opt-label">{{ opt.label }}</span>
-            <span v-if="opt.description" class="question-opt-desc">{{ opt.description }}</span>
-          </span>
-        </button>
-
-        <button
-          class="question-option"
-          :class="{ picked: picked[i] === customIndex(q) }"
-          @click="pick(i, customIndex(q), q)"
-        >
-          <span class="question-letter">{{ LETTERS[customIndex(q)] }}</span>
-          <span class="question-opt-main">
-            <span class="question-opt-label muted">输入自定义回答…</span>
-          </span>
-        </button>
-        <textarea
-          v-if="picked[i] === customIndex(q)"
-          v-model="custom[i]"
-          class="question-custom"
-          rows="2"
-          placeholder="写下你的答案"
-        ></textarea>
+          v-for="(_, i) in questions"
+          :key="i"
+          type="button"
+          class="question-dot"
+          :class="{ answered: isAnswered(i), active: i === index }"
+          :title="`第 ${i + 1} 题${isAnswered(i) ? '(已作答)' : ''}`"
+          @click="goto(i)"
+        ></button>
+        <span class="question-step">{{ index + 1 }} / {{ questions.length }}</span>
       </div>
-    </template>
+
+      <div class="question-text">{{ index + 1 }}. {{ question.question }}</div>
+
+      <button
+        v-for="(opt, oi) in question.options"
+        :key="oi"
+        type="button"
+        class="question-option"
+        :class="{ picked: picked[index] === oi }"
+        @click="pick(index, oi, question)"
+      >
+        <span class="question-letter">{{ LETTERS[oi] }}</span>
+        <span class="question-opt-main">
+          <span class="question-opt-label">{{ opt.label }}</span>
+          <span v-if="opt.description" class="question-opt-desc">{{ opt.description }}</span>
+        </span>
+      </button>
+
+      <button
+        type="button"
+        class="question-option"
+        :class="{ picked: picked[index] === customIndex(question) }"
+        @click="pick(index, customIndex(question), question)"
+      >
+        <span class="question-letter">{{ LETTERS[customIndex(question)] }}</span>
+        <span class="question-opt-main">
+          <span class="question-opt-label muted">输入自定义回答…</span>
+        </span>
+      </button>
+      <textarea
+        v-if="picked[index] === customIndex(question)"
+        ref="customEl"
+        v-model="custom[index]"
+        class="question-custom"
+        rows="2"
+        placeholder="写下你的答案"
+      ></textarea>
+
+      <div class="question-nav">
+        <n-button size="tiny" quaternary :disabled="index === 0" @click="goto(index - 1)">
+          ‹ 上一题
+        </n-button>
+        <n-button
+          size="tiny"
+          quaternary
+          :disabled="index >= questions.length - 1"
+          @click="goto(index + 1)"
+        >
+          下一题 ›
+        </n-button>
+      </div>
+    </div>
 
     <div class="question-actions">
       <n-button size="small" :disabled="submitting" @click="submit(true)">跳过</n-button>
@@ -203,15 +252,44 @@ async function submit(skipped: boolean) {
 .question-chevron.collapsed {
   transform: rotate(-90deg);
 }
-.question-item {
-  padding: 4px 12px 8px;
+.question-body {
+  padding: 0 12px 4px;
   border-top: 1px solid var(--border);
+}
+/* 进度点:已作答淡蓝、当前题实心,可点击跳题 */
+.question-progress {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 0 0;
+}
+.question-dot {
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--bg-active);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.question-dot.answered {
+  background: var(--accent-soft);
+}
+.question-dot.active {
+  background: var(--accent);
+}
+.question-step {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
 }
 .question-text {
   font-size: 13px;
   line-height: 1.6;
   color: var(--text);
-  margin: 6px 0 8px;
+  margin: 8px 0;
 }
 .question-option {
   display: flex;
@@ -290,6 +368,11 @@ async function submit(skipped: boolean) {
 }
 .question-custom:focus {
   outline: none;
+}
+.question-nav {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 0 6px;
 }
 .question-actions {
   display: flex;

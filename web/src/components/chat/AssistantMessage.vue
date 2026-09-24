@@ -10,10 +10,21 @@ import ErrorBanner from './ErrorBanner.vue'
 import { buildRenderBlocks, type RenderBlock } from './renderBlocks'
 import type { ApprovalAction, ChatMessage, PendingMessage, PendingSegment, ToolCall } from '../../types'
 
-const props = defineProps<{
-  message?: ChatMessage
-  pending?: PendingMessage
-}>()
+const props = withDefaults(
+  defineProps<{
+    message?: ChatMessage
+    pending?: PendingMessage
+    /**
+     * 是否为会话里的最后一条消息。
+     *
+     * 挂起态(待审批 / 待回答)只在末尾才有意义:用户答复后本轮会继续跑并落一条新消息,
+     * 而旧消息上的 meta.pending_approval 仍然留在库里 —— 不判断这一项,刷新后
+     * 已经回答过的问题卡 / 审批卡会重新冒出来,点它还会拿一份过期的动作集去恢复中断。
+     */
+    isLast?: boolean
+  }>(),
+  { isLast: false },
+)
 
 const emit = defineEmits<{ (e: 'retry'): void }>()
 
@@ -45,9 +56,12 @@ const error = computed(() => props.pending?.error ?? props.message?.meta.error)
 const interrupted = computed(() => props.pending?.status === 'interrupted')
 
 /** 待审批动作:优先取流式状态,其次取落库的挂起标记(刷新后仍可批准/拒绝) */
-const approvalActions = computed<ApprovalAction[]>(
-  () => props.pending?.approval ?? props.message?.meta.pending_approval?.actions ?? [],
-)
+const approvalActions = computed<ApprovalAction[]>(() => {
+  if (props.pending) return props.pending.approval ?? []
+  // 只有末尾消息的挂起标记才仍然有效(见 isLast 的说明)
+  if (!props.isLast) return []
+  return props.message?.meta.pending_approval?.actions ?? []
+})
 
 /** ask_user 挂起走需求澄清卡(选项 + 自定义输入),其余挂起走审批卡 */
 const askUserActions = computed(() => approvalActions.value.filter((a) => a.name === 'ask_user'))

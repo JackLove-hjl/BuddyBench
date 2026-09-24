@@ -25,7 +25,7 @@ BUILTIN_DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
 @dataclass(frozen=True)
 class ModelSpec:
-    """一个模型:标识 + 上下文规格(输入 / 输出 token 上限)。
+    """一个模型:标识 + 上下文规格(输入 / 输出 token 上限)+ 思考强度。
 
     为 None 表示未配置,消费方回退到默认值。
     """
@@ -33,6 +33,10 @@ class ModelSpec:
     id: str
     input_tokens: int | None = None
     output_tokens: int | None = None
+    # 思考强度(low / medium / high ...):非空时随请求下发 reasoning_effort。
+    # 部分平台的"快"模型默认不思考(返回的 reasoning_content 恒为 null),
+    # 必须显式指定强度才会输出思考过程。
+    reasoning_effort: str | None = None
 
 
 def _positive_int(raw: str) -> int | None:
@@ -90,13 +94,22 @@ def model_specs_from_rows(models: list | None, extra_models: list | None = None)
             mid = str(item.get("id") or "").strip()
             input_tokens = _positive_int(str(item.get("input_tokens") or ""))
             output_tokens = _positive_int(str(item.get("output_tokens") or ""))
+            reasoning_effort = str(item.get("reasoning_effort") or "").strip() or None
         else:
             mid = str(item or "").strip()
             input_tokens = output_tokens = None
+            reasoning_effort = None
         if not mid or mid in seen:
             continue
         seen.add(mid)
-        specs.append(ModelSpec(id=mid, input_tokens=input_tokens, output_tokens=output_tokens))
+        specs.append(
+            ModelSpec(
+                id=mid,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                reasoning_effort=reasoning_effort,
+            )
+        )
     return specs
 
 
@@ -188,12 +201,24 @@ class ModelRegistry:
         self._by_name: dict[str, ProviderRuntime] = {}
         self._lru: OrderedDict[str, ChatOpenAI] = OrderedDict()
         self._capacity = capacity
+        # 配置代数:只有 provider 集合发生实质变化时才 +1,供上层(AgentManager)判断缓存是否作废
+        self._generation = 0
         if providers:
             self.set_providers(providers)
 
+    @property
+    def generation(self) -> int:
+        """配置代数。未变化时保持不变,上层据此决定是否丢弃自己缓存的对象。"""
+        return self._generation
+
     def set_providers(self, providers: list[dict]) -> None:
-        """全量刷新 provider 映射(DB 变更后调用);清空 chat model 缓存。"""
-        self._by_name = {}
+        """全量刷新 provider 映射(由 deps 在每次请求前调用)。
+
+        配置**没变**时直接返回:既保住 chat model 缓存,也让上层 agent 缓存继续有效。
+        只有真的变了才清缓存并推进 generation —— 否则每来一个请求都会把
+        AgentManager 里已构建的图作废,重建开销白付。
+        """
+        updated: dict[str, ProviderRuntime] = {}
         for p in providers:
             name = str(p.get("name") or "").strip()
             if not name:
@@ -204,15 +229,19 @@ class ModelRegistry:
                 if raw_models and isinstance(raw_models[0], ModelSpec)
                 else model_specs_from_rows(raw_models, p.get("extra_models"))
             )
-            self._by_name[name] = ProviderRuntime(
+            updated[name] = ProviderRuntime(
                 name=name,
                 provider_type=str(p.get("provider_type") or "custom"),
                 base_url=str(p.get("base_url") or ""),
                 api_key=str(p.get("api_key") or ""),
                 models=specs,
             )
+        if updated == self._by_name:
+            return
+        self._by_name = updated
         # base_url/api_key 可能变化,旧 chat model 缓存作废
         self._lru.clear()
+        self._generation += 1
         logger.info("ModelRegistry 刷新: %d 个 provider", len(self._by_name))
 
     def list_models(self) -> list[ModelInfo]:
@@ -259,7 +288,8 @@ class ModelRegistry:
         p = self._by_name.get(provider_name)
         if p is None:
             raise ModelError("model_not_found", f"供应商 {provider_name} 不存在或已删除")
-        if not any(spec.id == mid for spec in p.models):
+        spec = next((s for s in p.models if s.id == mid), None)
+        if spec is None:
             raise ModelError(
                 "model_not_found",
                 f"模型 {mid} 不在供应商 {provider_name} 的模型列表中,请在设置里添加该模型",
@@ -277,6 +307,8 @@ class ModelRegistry:
             timeout=60,
             max_retries=1,
             streaming=True,  # 必须显式开,否则 on_chat_model_stream 不触发
+            # 思考强度:只在模型显式配置时下发 —— 不认识该参数的端点会直接 400
+            reasoning_effort=spec.reasoning_effort,
         )
         self._lru[model_id] = model
         self._lru.move_to_end(model_id)

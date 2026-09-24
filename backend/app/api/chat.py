@@ -6,7 +6,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent import bridge
@@ -15,12 +15,36 @@ from app.api.conversations import _get_conversation_or_404
 from app.api.deps import get_agent_manager, get_current_user, get_registry
 from app.core.registry import ModelError
 from app.db.base import get_session
-from app.db.models import User
+from app.db.models import Message, User
 from app.schemas.chat import ApprovalRequest, ChatRequest
 from app.services import chat_service
 from app.tools.plan import PLAN_TOOL_NAME
 
 router = APIRouter(tags=["chat"])
+
+
+async def _clear_pending_approvals(session: AsyncSession, conversation_id: uuid.UUID) -> None:
+    """用户已作出选择:清掉该会话消息上残留的待审批标记。
+
+    挂起态落在 `meta.pending_approval` 里,前端按它渲染 问题卡 / 审批卡。它只在
+    「正等用户决定」这个窗口期有效 —— 一旦用户答复/批准,本轮就会续跑并落新消息,
+    而旧消息上的标记若不清掉,刷新页面后这些早已处理完的卡片会再次冒出来
+    (点它们还会拿一份过期动作集去恢复一个早已恢复过的中断)。
+    """
+    rows = await session.scalars(
+        select(Message).where(
+            Message.conversation_id == conversation_id,
+            Message.meta.has_key("pending_approval"),
+        )
+    )
+    changed = False
+    for msg in rows.all():
+        meta = dict(msg.meta or {})
+        meta.pop("pending_approval", None)
+        msg.meta = meta
+        changed = True
+    if changed:
+        await session.commit()
 
 
 async def _is_plan_approval(
@@ -95,6 +119,8 @@ async def approve(
     交回 ToolNode 执行 —— 换成"非计划模式"的新图会既匹配不到配置、又找不到相关工具。
     """
     conv = await _get_conversation_or_404(session, req.conversation_id, user.id)
+    # 用户此刻已作出选择:挂起标记即刻作废(含刷新后重进会话的场景)
+    await _clear_pending_approvals(session, req.conversation_id)
     decisions = [d.model_dump(exclude_none=True) for d in req.decisions] or [{"type": "reject"}]
     try:
         agent = agent_manager.get_agent(

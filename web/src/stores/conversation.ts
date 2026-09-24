@@ -135,6 +135,27 @@ export const useConversationStore = defineStore('conversation', () => {
   const modelStore = useModelStore()
 
   /**
+   * 从已加载的消息里恢复上下文占用(取最近一条带 usage 的助手消息)。
+   *
+   * contextUsage 本身只活在内存里,只有 SSE done 事件会更新它 —— 不做这一步,
+   * 刷新页面 / 切换会话后圆环就清零了。而每条助手消息的 meta.usage 一直都有落库,
+   * 数据是现成的,只是没人去读。
+   */
+  function syncContextUsage() {
+    for (let i = messages.value.length - 1; i >= 0; i--) {
+      const msg = messages.value[i]
+      const usage = msg.meta?.usage
+      if (!usage?.prompt_tokens) continue
+      contextUsage.value.used = usage.prompt_tokens
+      // 分母尽量也恢复:按该消息所用模型查声明的输入上下文;查不到沿用当前值
+      const info = modelStore.models.find((m) => m.id === msg.model)
+      if (info?.input_tokens) contextUsage.value.window = info.input_tokens
+      return
+    }
+    contextUsage.value.used = 0
+  }
+
+  /**
    * 记录一条原始事件。
    *
    * 注意一个容易踩的坑:SSE 是**逐 chunk** 下发的(`bridge.translate` 每个 token 就 yield 一帧),
@@ -459,17 +480,17 @@ export const useConversationStore = defineStore('conversation', () => {
     const model = modelStore.currentModel
     if (!model) return { ok: false, error: { code: 'no_model', message: '请先选择可用模型' } }
 
-    // 清掉待审批标记(最近一条挂起中的助手消息),并判断这是不是计划评审
+    // 清掉待审批标记,并判断这是不是计划评审。
+    // 只认**最后一条**消息:更早的挂起标记早已作废(本轮已续跑并落了新消息),
+    // 往前扫描会拿到一份过期的动作集去恢复中断(与 AssistantMessage 的 isLast 判断一致)。
     let planReview = false
     let actions: ApprovalAction[] = []
-    for (let i = messages.value.length - 1; i >= 0; i--) {
-      const pa = messages.value[i].meta.pending_approval
-      if (pa) {
-        actions = pa.actions
-        planReview = pa.actions.some((a) => a.name === 'exit_plan_mode')
-        messages.value[i].meta.pending_approval = undefined
-        break
-      }
+    const last = messages.value[messages.value.length - 1]
+    const pendingApproval = last?.meta.pending_approval
+    if (last && pendingApproval) {
+      actions = pendingApproval.actions
+      planReview = pendingApproval.actions.some((a) => a.name === 'exit_plan_mode')
+      last.meta.pending_approval = undefined
     }
     // 批准计划时后端会关闭计划模式(与 api/chat.py 同一判定规则),前端同步跟随
     if (planReview && decide === 'approve') {
@@ -558,6 +579,7 @@ export const useConversationStore = defineStore('conversation', () => {
     try {
       const resp = await getMessages(id)
       messages.value = resp.items
+      syncContextUsage()
       // 从列表同步权限/工作区/计划模式(selectConversation 前先 refreshList 保证列表含该项)
       const cur = list.value.find((c) => c.id === id)
       if (cur) {
@@ -579,6 +601,8 @@ export const useConversationStore = defineStore('conversation', () => {
     currentId.value = null
     messages.value = []
     pending.value = null
+    // 新对话还没有任何上下文,圆环归零
+    contextUsage.value.used = 0
     // 保留当前选择的工作区与权限,新对话默认继承(符合"开启新对话默认为当前工作区")
     if (router.currentRoute.value.path !== '/') {
       void router.push('/').catch(() => {})

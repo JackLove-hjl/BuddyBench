@@ -38,7 +38,16 @@ interface ModelRow {
   id: string
   input_tokens: string
   output_tokens: string
+  /** 思考强度:null / 空 = 不下发 reasoning_effort(用端点默认行为) */
+  reasoning_effort: string | null
 }
+
+/** 思考强度预设(filterable + tag,允许填端点特有的取值) */
+const REASONING_OPTIONS = [
+  { label: 'low', value: 'low' },
+  { label: 'medium', value: 'medium' },
+  { label: 'high', value: 'high' },
+]
 
 const form = reactive({
   name: '',
@@ -54,10 +63,11 @@ const toRows = (items: ProviderModelItem[]): ModelRow[] =>
     id: m.id,
     input_tokens: m.input_tokens ? String(m.input_tokens) : '',
     output_tokens: m.output_tokens ? String(m.output_tokens) : '',
+    reasoning_effort: m.reasoning_effort || null,
   }))
 
 function addModelRow() {
-  form.models.push({ id: '', input_tokens: '', output_tokens: '' })
+  form.models.push({ id: '', input_tokens: '', output_tokens: '', reasoning_effort: null })
 }
 
 function removeModelRow(index: number) {
@@ -71,6 +81,7 @@ function collectModels(): ProviderModelItem[] {
       id: row.id.trim(),
       input_tokens: Number(row.input_tokens) > 0 ? Number(row.input_tokens) : undefined,
       output_tokens: Number(row.output_tokens) > 0 ? Number(row.output_tokens) : undefined,
+      reasoning_effort: row.reasoning_effort?.trim() || undefined,
     }))
     .filter((m) => m.id)
 }
@@ -86,7 +97,7 @@ async function onDiscover() {
     for (const item of found) {
       if (existing.has(item.id)) continue
       existing.add(item.id)
-      form.models.push({ id: item.id, input_tokens: '', output_tokens: '' })
+      form.models.push({ id: item.id, input_tokens: '', output_tokens: '', reasoning_effort: null })
       added += 1
     }
     message.success(
@@ -209,7 +220,7 @@ onMounted(() => {
     preset="card"
     class="settings-modal"
     title="设置"
-    style="width: 640px"
+    style="width: 720px"
     :bordered="false"
     :mask-closable="true"
     @update:show="(v: boolean) => emit('update:show', v)"
@@ -329,12 +340,22 @@ onMounted(() => {
                   <span class="model-col-name">模型名</span>
                   <span class="model-col-num">输入上下文</span>
                   <span class="model-col-num">最大输出</span>
+                  <span class="model-col-num">思考强度</span>
                   <span class="model-col-op"></span>
                 </div>
                 <div v-for="(row, i) in form.models" :key="i" class="model-editor-row">
                   <n-input v-model:value="row.id" size="small" placeholder="deepseek-v4.1-flash" />
                   <n-input v-model:value="row.input_tokens" size="small" placeholder="1000000" />
                   <n-input v-model:value="row.output_tokens" size="small" placeholder="384000" />
+                  <n-select
+                    v-model:value="row.reasoning_effort"
+                    size="small"
+                    clearable
+                    filterable
+                    tag
+                    placeholder="默认"
+                    :options="REASONING_OPTIONS"
+                  />
                   <n-button size="tiny" quaternary type="error" @click="removeModelRow(i)">删除</n-button>
                 </div>
                 <div class="model-editor-actions">
@@ -506,7 +527,7 @@ onMounted(() => {
 .model-editor-head,
 .model-editor-row {
   display: grid;
-  grid-template-columns: 1.6fr 1fr 1fr auto;
+  grid-template-columns: 1.3fr 1fr 1fr 0.9fr auto;
   gap: 6px;
   align-items: center;
 }

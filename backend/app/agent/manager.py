@@ -67,6 +67,8 @@ class AgentManager:
         self._loop_repeats = loop_repeats
         self._lru: OrderedDict[str, object] = OrderedDict()
         self._capacity = capacity
+        # 已同步的 registry 配置代数(见 ModelRegistry.generation)
+        self._registry_generation = -1
 
     @staticmethod
     def _approval_config(permission: str, plan_mode: bool) -> dict | None:
@@ -123,6 +125,16 @@ class AgentManager:
         """懒构建 + LRU 缓存。key = model_id + permission + workspace_root + plan_mode,
         任一项变化都会构建新图实例(计划模式同时改变提示词与工具集)。"""
         key = f"{model_id}::{permission}::{workspace_root or ''}::{int(plan_mode)}"
+
+        # 供应商配置变了(base_url / api_key / 模型增删)就必须整体作废:
+        # 图在构建时就把 ChatOpenAI 实例固化进去了(实例内含当时的 base_url),
+        # 只清 registry 的缓存没用 —— 命中下面的 _lru 时压根不会再调 get_chat_model,
+        # 于是「改完配置仍旧报旧错」(例如仍打到旧的 base_url 上 404)。
+        generation = self._registry.generation
+        if generation != self._registry_generation:
+            self._lru.clear()
+            self._registry_generation = generation
+
         if key in self._lru:
             self._lru.move_to_end(key)
             return self._lru[key]
