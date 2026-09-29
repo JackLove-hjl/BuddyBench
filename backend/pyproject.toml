@@ -20,6 +20,8 @@ dependencies = [
     "psutil>=6",
     "python-multipart>=0.0.9",
     "pywinpty>=2.0",
+    # computer use:鼠标键盘输入(截屏复用 Pillow,PIL.ImageGrab)
+    "pyautogui>=0.9.54",
     "httpx>=0.27",
 ]
 
