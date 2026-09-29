@@ -12,6 +12,8 @@ export default defineConfig({
       '/api': {
         target: process.env.VITE_API_TARGET || 'http://localhost:8000',
         changeOrigin: true,
+        // 侧栏终端的 WebSocket 也走 /api 前缀:不打开 ws,升级请求会被 dev server 丢掉
+        ws: true,
       },
       '/images': {
         target: process.env.VITE_API_TARGET || 'http://localhost:8000',

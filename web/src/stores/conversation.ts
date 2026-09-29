@@ -10,6 +10,8 @@ import {
 } from '../api/conversations'
 import { setWorkspace } from '../api/workspaces'
 import { approveChat, streamChat } from '../api/stream'
+import { reduceTurn, turnElapsedMs } from '../utils/turnTimer'
+import type { TurnAction, TurnTiming } from '../utils/turnTimer'
 import { useModelStore } from './model'
 import { router } from '../router'
 import type {
@@ -130,6 +132,22 @@ export const useConversationStore = defineStore('conversation', () => {
   const planMode = ref(localStorage.getItem('llm-plan') === '1')
   // 上下文使用情况(最近一次响应),供对话框发送按钮左侧圆圈展示
   const contextUsage = ref<{ used: number; window: number }>({ used: 0, window: 128000 })
+  // 本轮用时:由纯状态机推导(utils/turnTimer.ts),等待用户审批/回答的时间不计入
+  const turnTiming = ref<TurnTiming | null>(null)
+
+  /** 推进本轮计时状态机(纯逻辑在 utils/turnTimer.ts,已被单测覆盖) */
+  function markTurn(action: TurnAction) {
+    turnTiming.value = reduceTurn(turnTiming.value, action)
+  }
+
+  /**
+   * 前端口径的本轮用时(ms),兜底给"没等到 done 就结束"的消息用:
+   * 手动停止、连接断开时后端来不及落库,这条消息只存在本地,用前端计时补上数值。
+   */
+  function clientTurnMs(): number | undefined {
+    const ms = turnElapsedMs(turnTiming.value, Date.now())
+    return ms > 0 ? ms : undefined
+  }
 
   let controller: AbortController | null = null
   const modelStore = useModelStore()
@@ -223,6 +241,8 @@ export const useConversationStore = defineStore('conversation', () => {
   function handleApproval(ev: SSEApprovalEvent) {
     const p = pending.value
     if (!p) return
+    // 进入"等待用户决策":计时暂停(审批卡/计划评审/提问期间模型没在干活)
+    markTurn({ type: 'wait', at: Date.now() })
     // 工具已写完参数、正等着人工批准:卡片停在"待批准"(内容仍可查看),不再转圈
     settleArgsCards(p, 'paused')
     p.approval = ev.actions
@@ -325,10 +345,14 @@ export const useConversationStore = defineStore('conversation', () => {
   function finalize(ev: SSEDoneEvent) {
     const p = pending.value
     if (!p) return
+    // 本轮结束:用时定稿(此后展示的是"本轮总用时")
+    markTurn({ type: 'end', at: Date.now() })
     settleArgsCards(p, 'end')
     messages.value.push(toAssistantMessage(ev.message_id, p, ev.model, {
       images: ev.images.length ? ev.images : undefined,
       usage: ev.usage && (ev.usage.prompt_tokens || ev.usage.completion_tokens) ? ev.usage : undefined,
+      // 用时以后端为准(与刷新后从 meta 读回来的同一个值);事件里没带就用前端计时兜底
+      duration_ms: ev.duration_ms ?? clientTurnMs(),
     }))
     // 记录上下文使用情况(本次请求 prompt_tokens ≈ 已占用上下文)
     if (ev.usage?.prompt_tokens) {
@@ -349,13 +373,18 @@ export const useConversationStore = defineStore('conversation', () => {
       pending.value = null
       streaming.value = false
       controller = null
+      // 本轮根本没跑起来,不留"用时 0s"的残迹
+      markTurn({ type: 'reset' })
       return { ok: false, error: { code: ev.code, message: ev.message } }
     }
     if (!p) return { ok: false, error: { code: ev.code, message: ev.message } }
+    markTurn({ type: 'end', at: Date.now() })
     settleArgsCards(p, 'end')
     p.status = ev.code === 'network' ? 'interrupted' : 'error'
     p.error = ev.message
-    messages.value.push(toAssistantMessage(`local-err-${Date.now()}`, p))
+    messages.value.push(
+      toAssistantMessage(`local-err-${Date.now()}`, p, undefined, { duration_ms: clientTurnMs() }),
+    )
     pending.value = null
     streaming.value = false
     controller = null
@@ -402,6 +431,9 @@ export const useConversationStore = defineStore('conversation', () => {
     if (!model) {
       return { ok: false, error: { code: 'no_model', message: '请先选择可用模型' } }
     }
+
+    // 新一轮开始:计时归零重新走(上一轮的总用时随之被替换)
+    markTurn({ type: 'begin', at: Date.now() })
 
     if (!skipUserPush) messages.value.push(optimisticUserMessage(trimmed || '[附件]', attachments))
     pending.value = {
@@ -452,12 +484,15 @@ export const useConversationStore = defineStore('conversation', () => {
   function stop() {
     controller?.abort()
     controller = null
+    markTurn({ type: 'end', at: Date.now() })
     const p = pending.value
     if (p && p.status === 'streaming') {
       settleArgsCards(p, 'end')
       p.status = 'interrupted'
       if (p.content.trim() || p.images.length || p.toolCalls.length) {
-        messages.value.push(toAssistantMessage(`local-stop-${Date.now()}`, p))
+        messages.value.push(
+          toAssistantMessage(`local-stop-${Date.now()}`, p, undefined, { duration_ms: clientTurnMs() }),
+        )
       }
       pending.value = null
       streaming.value = false
@@ -497,6 +532,9 @@ export const useConversationStore = defineStore('conversation', () => {
       planMode.value = false
       persistDefaults()
     }
+
+    // 用户已决策:本轮继续,等待期间的那段不计入(见 utils/turnTimer.ts)
+    markTurn({ type: 'resume', at: Date.now() })
 
     pending.value = {
       status: 'streaming',
@@ -575,6 +613,8 @@ export const useConversationStore = defineStore('conversation', () => {
     currentId.value = id
     messages.value = []
     pending.value = null
+    // 计时属于"某一次对话",切换会话后不再展示上一个会话的用时
+    markTurn({ type: 'reset' })
     loading.value = true
     try {
       const resp = await getMessages(id)
@@ -601,6 +641,7 @@ export const useConversationStore = defineStore('conversation', () => {
     currentId.value = null
     messages.value = []
     pending.value = null
+    markTurn({ type: 'reset' })
     // 新对话还没有任何上下文,圆环归零
     contextUsage.value.used = 0
     // 保留当前选择的工作区与权限,新对话默认继承(符合"开启新对话默认为当前工作区")
@@ -739,6 +780,9 @@ export const useConversationStore = defineStore('conversation', () => {
     workspacePath,
     planMode,
     contextUsage,
+    turnTiming,
+    /** 模型列表是异步加载的:拿到声明窗口后要重算一次,否则圆环分母会停在默认值 */
+    syncContextUsage,
     send,
     stop,
     approve,

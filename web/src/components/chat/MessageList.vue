@@ -130,7 +130,8 @@ function onRetry() {
   box-sizing: border-box;
 }
 .message-container {
-  max-width: 760px;
+  /* 与输入框同宽:宽屏下两侧留白小一些(原先 760px 在 2K 屏上两侧各空掉一大块) */
+  max-width: 1100px;
   margin: 0 auto;
 }
 .welcome {

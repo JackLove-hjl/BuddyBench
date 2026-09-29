@@ -7,7 +7,9 @@ import CompactNote from './CompactNote.vue'
 import ApprovalCard from './ApprovalCard.vue'
 import QuestionCard from './QuestionCard.vue'
 import ErrorBanner from './ErrorBanner.vue'
-import { buildRenderBlocks, type RenderBlock } from './renderBlocks'
+import TurnDuration from './TurnDuration.vue'
+import MessageActions from './MessageActions.vue'
+import { buildRenderBlocks, dedupeToolSegments, type RenderBlock } from './renderBlocks'
 import type { ApprovalAction, ChatMessage, PendingMessage, PendingSegment, ToolCall } from '../../types'
 
 const props = withDefaults(
@@ -42,11 +44,12 @@ const toolCalls = computed(() => {
 })
 
 // 按真实执行顺序渲染:流式用 pending.segments,历史回放用 meta.segments,
-// 旧数据(无时间线)退化为「思考整体在前 + 工具卡随后」
+// 旧数据(无时间线)退化为「思考整体在前 + 工具卡随后」。
+// timeline 里的重复工具卡(后端曾重复 append,历史数据已脏)在这里统一去重。
 const segments = computed<PendingSegment[]>(() => {
-  if (props.pending?.segments?.length) return props.pending.segments
+  if (props.pending?.segments?.length) return dedupeToolSegments(props.pending.segments)
   const saved = props.message?.meta.segments
-  if (saved && saved.length) return saved
+  if (saved && saved.length) return dedupeToolSegments(saved)
   const out: PendingSegment[] = []
   if (reasoning.value.trim()) out.push({ kind: 'reasoning', content: reasoning.value })
   for (const tc of toolCalls.value) out.push({ kind: 'tool', call: tc })
@@ -65,6 +68,28 @@ const approvalActions = computed<ApprovalAction[]>(() => {
 
 /** ask_user 挂起走需求澄清卡(选项 + 自定义输入),其余挂起走审批卡 */
 const askUserActions = computed(() => approvalActions.value.filter((a) => a.name === 'ask_user'))
+
+/**
+ * 本轮用时(固定在回复内容**上方**,见 TurnDuration.vue):
+ * - 已落库的消息取 meta.duration_ms → 刷新后仍在;
+ * - 正在流式、或正等用户审批/回答时,由前端计时实时给出(等待期间数值冻住)。
+ */
+const durationMs = computed(() => props.message?.meta.duration_ms ?? null)
+const liveTimer = computed(() => isStreaming.value || approvalActions.value.length > 0)
+const showDuration = computed(() => liveTimer.value || durationMs.value !== null)
+
+/** 计时行下方要画分割线:只有下面真有内容时才画,空回复下面挂条线反而突兀 */
+const hasContentBelow = computed(
+  () => !!content.value.trim() || (blocks.value?.length ?? 0) > 0 || segments.value.length > 0,
+)
+
+/** 复制/评价只在跑完的回复上给:流式中、挂起等审批、纯空回复都不给 */
+const showActions = computed(
+  () =>
+    !isStreaming.value &&
+    !approvalActions.value.length &&
+    (!!content.value.trim() || toolCalls.value.length > 0),
+)
 
 /**
  * 优先用原始事件流渲染:事件流里含正文 delta,因此能精确还原
@@ -109,6 +134,15 @@ function blockStreaming(block: RenderBlock, index: number): boolean {
       </svg>
     </div>
     <div class="body">
+      <!-- 用时固定在回复内容上方,下方用分割线与正文分开 -->
+      <TurnDuration
+        v-if="showDuration"
+        :ms="durationMs"
+        :live="liveTimer"
+        :steps="toolCalls"
+        :divider="hasContentBelow"
+      />
+
       <!-- 事件流路径:正文/思考/工具按真实顺序交错 -->
       <template v-if="blocks">
         <template v-for="(block, i) in blocks" :key="`${block.kind}-${i}`">
@@ -141,6 +175,14 @@ function blockStreaming(block: RenderBlock, index: number): boolean {
         :message="error"
         :interrupted="interrupted"
         @retry="emit('retry')"
+      />
+
+      <!-- 回复下方的操作栏:复制 / 好的回答 / 有问题的回答 -->
+      <MessageActions
+        v-if="showActions"
+        :content="content"
+        :message-id="message?.id ?? null"
+        :model="message?.model ?? null"
       />
     </div>
   </div>

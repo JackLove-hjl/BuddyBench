@@ -3,6 +3,7 @@ import { onBeforeUnmount, onMounted, computed } from 'vue'
 import { NConfigProvider, NMessageProvider, NDialogProvider, NSpin, darkTheme, zhCN, dateZhCN } from 'naive-ui'
 import { useThemeStore } from './stores/theme'
 import { useAuthStore } from './stores/auth'
+import ImagePreview from './components/common/ImagePreview.vue'
 
 const themeStore = useThemeStore()
 const authStore = useAuthStore()
@@ -38,6 +39,8 @@ onBeforeUnmount(() => {
           <n-spin v-if="authStore.initializing" class="app-loading" />
           <router-view v-else />
         </div>
+        <!-- 图片放大浮层:全站只挂一次,任意组件用 useImagePreview().openImage 打开 -->
+        <ImagePreview />
       </n-dialog-provider>
     </n-message-provider>
   </n-config-provider>

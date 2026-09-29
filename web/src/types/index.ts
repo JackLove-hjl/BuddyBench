@@ -138,6 +138,13 @@ export interface MessageMeta {
   error?: string
   reasoning?: string
   attachments?: { url: string; filename: string; kind: 'image' | 'file' }[]
+  /**
+   * 本轮干活用时(ms),由后端在收尾消息上落库 → 刷新后回复底部的"用时 X 秒"仍在。
+   * 等待用户审批/回答的那段时间不计入(那期间后端没有请求在跑)。
+   */
+  duration_ms?: number
+  /** 中途挂起(等审批)的消息上记的"已干活用时",供续跑时续算,前端不展示 */
+  active_ms?: number
 }
 
 export interface ChatMessage {
@@ -213,6 +220,8 @@ export interface SSEDoneEvent extends SSEBaseEvent {
   usage: Usage
   /** 模型上下文窗口大小(用于前端上下文使用率圆圈) */
   context_window?: number
+  /** 本轮干活用时(ms):显示在回复底部"用时 X 秒" */
+  duration_ms?: number
 }
 
 export interface SSEErrorEvent extends SSEBaseEvent {

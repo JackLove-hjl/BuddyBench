@@ -15,11 +15,12 @@ export function useCodeCopy() {
     const button = (event.target as HTMLElement | null)?.closest<HTMLButtonElement>('.code-copy-btn')
     if (!button) return
 
-    const pre = button.closest('.code-wrap')?.querySelector('pre')
+    // diff 视图(不是 <pre>)也支持复制:它把原文挂在根节点的 data-code 上
+    const pre = button.closest('.code-wrap')?.querySelector('pre, [data-code]')
     if (!pre) return
 
     // data-code 优先:命令块整体着色时带了 `$ ` 提示符,复制要拿不带前缀的原文
-    const text = pre.dataset.code ?? pre.textContent ?? ''
+    const text = (pre as HTMLElement).dataset.code ?? pre.textContent ?? ''
     const label = button.textContent || ''
 
     const ok = await copyText(text)

@@ -1,24 +1,31 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { resolveAssetUrl } from '../../utils/asset'
+import { useImagePreview } from '../../composables/useImagePreview'
 
 const props = defineProps<{ content: string; attachments?: { url: string; filename: string; kind: 'image' | 'file' }[] }>()
 
 const images = computed(() => props.attachments?.filter((a) => a.kind === 'image') || [])
 const files = computed(() => props.attachments?.filter((a) => a.kind === 'file') || [])
+
+/** 附件图片统一用缩略图展示,点开才进放大浮层(全站共用,见 ImagePreview.vue) */
+const { openImage } = useImagePreview()
 </script>
 
 <template>
   <div class="user-msg-row">
     <div class="user-msg">
       <div v-if="images.length" class="user-att-images">
-        <img
+        <button
           v-for="(img, i) in images"
           :key="img.url + i"
-          :src="resolveAssetUrl(img.url)"
-          :alt="img.filename"
-          loading="lazy"
-        />
+          type="button"
+          class="user-att-thumb"
+          :title="`${img.filename} · 点击放大`"
+          @click="openImage(resolveAssetUrl(img.url), img.filename)"
+        >
+          <img :src="resolveAssetUrl(img.url)" :alt="img.filename" loading="lazy" />
+        </button>
       </div>
       <div v-if="files.length" class="user-att-files">
         <!-- 有 URL 的附件(本地文件上传)显示为下载链接;@ 引用文件无 URL 显示纯文本文件名 -->
@@ -58,15 +65,31 @@ const files = computed(() => props.attachments?.filter((a) => a.kind === 'file')
 }
 .user-att-images {
   display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
   gap: 6px;
   margin-bottom: 6px;
 }
-.user-att-images img {
-  max-width: 100%;
-  max-height: 240px;
+/* 缩略图:一排小图,点开进放大浮层(不再直接铺满气泡) */
+.user-att-thumb {
+  padding: 0;
+  border: 1px solid var(--border);
   border-radius: 8px;
+  background: transparent;
+  line-height: 0;
+  overflow: hidden;
+  cursor: zoom-in;
+}
+.user-att-thumb img {
   display: block;
+  max-width: 180px;
+  max-height: 120px;
+  width: auto;
+  height: auto;
+  object-fit: cover;
+  border-radius: 7px;
+}
+.user-att-thumb:hover {
+  border-color: var(--border-strong);
 }
 .user-att-files {
   display: flex;

@@ -2,9 +2,26 @@
 import { computed, ref } from 'vue'
 import { NPopover } from 'naive-ui'
 import { useAuthStore } from '../../stores/auth'
+import { useThemeStore, type ThemeMode } from '../../stores/theme'
+import ProviderSettingsDialog from '../settings/ProviderSettingsDialog.vue'
 
 const authStore = useAuthStore()
+const themeStore = useThemeStore()
 const show = ref(false)
+const settingsOpen = ref(false)
+
+// 主题与设置原先在对话右上角,统一收到个人中心里
+const THEMES: { value: ThemeMode; label: string }[] = [
+  { value: 'light', label: '浅色' },
+  { value: 'dark', label: '深色' },
+  { value: 'system', label: '跟随系统' },
+]
+
+function onSettings() {
+  // 先开弹窗再收浮层:顺序反过来在弹窗还挂在浮层里的时代会丢事件(见模板注释)
+  settingsOpen.value = true
+  show.value = false
+}
 
 const username = computed(() => authStore.user?.username || '用户')
 const avatarText = computed(() => (username.value || '?').slice(0, 1).toUpperCase())
@@ -43,7 +60,32 @@ function onLogout() {
           <div v-if="createdAt" class="user-menu-date">注册于 {{ createdAt }}</div>
         </div>
       </div>
-      <button class="user-menu-item" @click="onLogout">
+      <!-- 主题:直接三段切换,不再单开一个浮层 -->
+      <div class="user-menu-label">主题</div>
+      <div class="theme-seg">
+        <button
+          v-for="item in THEMES"
+          :key="item.value"
+          type="button"
+          class="theme-seg-btn"
+          :class="{ active: themeStore.mode === item.value }"
+          @click="themeStore.setMode(item.value)"
+        >
+          {{ item.label }}
+        </button>
+      </div>
+
+      <div class="user-menu-sep" />
+
+      <button class="user-menu-item" @click="onSettings">
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="8" cy="8" r="2" />
+          <path d="M8 1.5v1.2M8 13.3v1.2M1.5 8h1.2M13.3 8h1.2M3.4 3.4l.85.85M11.75 11.75l.85.85M3.4 12.6l.85-.85M11.75 4.25l.85-.85" />
+        </svg>
+        设置
+      </button>
+
+      <button class="user-menu-item danger" @click="onLogout">
         <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor">
           <path d="M8 2.5a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V3a.5.5 0 0 1 .5-.5zM4.5 4.2a.5.5 0 0 1-.12.7A5 5 0 1 0 8 3a.5.5 0 1 1-.42-.9A6 6 0 1 1 4.5 4.2z" transform="rotate(180 8 8)" />
         </svg>
@@ -51,6 +93,13 @@ function onLogout() {
       </button>
     </div>
   </n-popover>
+
+  <!--
+    设置弹窗必须挂在 popover **外面**:naive-ui 的 popover 关闭时会卸载内容,
+    挂在里面的写法是「点设置 → 先关 popover → 弹窗随内容一起被卸载」,弹窗根本打不开。
+    放到外面后 popover 只是收起,弹窗独立存在。
+  -->
+  <ProviderSettingsDialog v-model:show="settingsOpen" />
 </template>
 
 <style scoped>
@@ -145,7 +194,48 @@ function onLogout() {
   text-align: left;
 }
 .user-menu-item:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+/* 退出登录保持危险色;设置项用普通 hover */
+.user-menu-item.danger:hover {
   background: var(--danger-soft);
   color: var(--danger);
+}
+.user-menu-label {
+  padding: 4px 10px 6px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+.theme-seg {
+  display: flex;
+  gap: 4px;
+  padding: 0 6px;
+}
+.theme-seg-btn {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.theme-seg-btn:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.theme-seg-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.user-menu-sep {
+  height: 1px;
+  margin: 8px 10px;
+  background: var(--border);
 }
 </style>

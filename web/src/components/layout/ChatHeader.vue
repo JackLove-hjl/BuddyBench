@@ -1,11 +1,10 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
 import { useConversationStore } from '../../stores/conversation'
-import ThemeToggle from '../common/ThemeToggle.vue'
-import ProviderSettingsDialog from '../settings/ProviderSettingsDialog.vue'
+import { useSidePanel } from '../../composables/useSidePanel'
 
 const convStore = useConversationStore()
-const settingsOpen = ref(false)
+const { open: panelOpen, openPanel } = useSidePanel()
 
 const title = computed(() => {
   const id = convStore.currentId
@@ -19,16 +18,14 @@ const title = computed(() => {
   <header class="chat-header">
     <h1 class="chat-title">{{ title }}</h1>
     <div class="chat-header-actions">
-      <ThemeToggle />
-      <button class="icon-btn" title="设置" @click="settingsOpen = true">
+      <!-- 侧栏收起时,在这里把右侧栏打开(打开状态会被记住) -->
+      <button v-if="!panelOpen" class="icon-btn" title="打开右侧栏" @click="openPanel()">
         <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="8" cy="8" r="2" />
-          <path d="M8 1.5v1.2M8 13.3v1.2M1.5 8h1.2M13.3 8h1.2M3.4 3.4l.85.85M11.75 11.75l.85.85M3.4 12.6l.85-.85M11.75 4.25l.85-.85" />
+          <rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1.6" />
+          <path d="M9.8 2.8v10.4" />
         </svg>
       </button>
     </div>
-
-    <ProviderSettingsDialog v-model:show="settingsOpen" />
   </header>
 </template>
 

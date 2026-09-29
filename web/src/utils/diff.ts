@@ -49,3 +49,26 @@ export function lineDiff(oldText: string, newText: string): DiffLine[] {
   while (j < b.length) out.push({ kind: 'add', text: b[j++] })
   return out
 }
+
+/**
+ * 新建文件的 diff:整篇都是新增。
+ *
+ * 不能直接用 `lineDiff('', content)`:空串 split 出来是一个空行,会凭空多一条删除。
+ */
+export function newFileDiff(content: string): DiffLine[] {
+  if (!content) return []
+  // 末尾换行会 split 出一个空元素,当成一行新增会让统计多算一行
+  const text = content.endsWith('\n') ? content.slice(0, -1) : content
+  return text.split('\n').map((line) => ({ kind: 'add' as const, text: line }))
+}
+
+/** +新增 / −删除 行数统计(卡片头部的 +14 −1) */
+export function diffStats(lines: DiffLine[]): { added: number; removed: number } {
+  let added = 0
+  let removed = 0
+  for (const line of lines) {
+    if (line.kind === 'add') added += 1
+    else if (line.kind === 'del') removed += 1
+  }
+  return { added, removed }
+}

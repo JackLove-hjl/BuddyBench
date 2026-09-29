@@ -475,7 +475,7 @@ async function onPaste(e: ClipboardEvent) {
 /* 顶部行:工作区(输入框上方一行,左对齐,宽度与输入框一致) */
 .chat-input-prebar {
   width: 100%;
-  max-width: 760px;
+  max-width: 1100px;
   display: flex;
   align-items: center;
   margin-bottom: 6px;
@@ -484,7 +484,7 @@ async function onPaste(e: ClipboardEvent) {
 .chat-input-box {
   position: relative;
   width: 100%;
-  max-width: 760px;
+  max-width: 1100px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
   border-radius: 16px;
