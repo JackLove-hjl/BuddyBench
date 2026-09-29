@@ -19,6 +19,7 @@ dependencies = [
     "matplotlib>=3.9",
     "psutil>=6",
     "python-multipart>=0.0.9",
+    "pywinpty>=2.0",
     "httpx>=0.27",
 ]
 
@@ -27,3 +28,14 @@ llm-backend = "run:main"
 
 [tool.uv]
 # uv 管理的项目,本机虚拟环境存放在 .venv
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+# 测试目录就是 tests/;这些断言同时支持两种跑法:
+#   uv run pytest        (推荐,一条命令跑全部)
+#   python tests/test_x.py (零依赖,没装 pytest 也能跑)
+testpaths = ["tests"]

@@ -10,5 +10,8 @@ langgraph>=1.2
 langgraph-checkpoint-postgres>=3.1.1
 psycopg[binary]>=3.3
 matplotlib>=3.9
+pyautogui>=0.9.54
 psutil>=6
 python-multipart>=0.0.9
+# 侧栏终端:Windows ConPTY(非 Windows 下是 ptyprocess 封装,同一套 API)
+pywinpty>=2.0
