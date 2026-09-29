@@ -15,7 +15,10 @@ node_modules/
 dist/
 
 # generated / uploaded assets
-backend/static/images/*.png
+# 图片(含 computer use 的 jpeg 截图)、超长工具结果落盘、用户上传 —— 都是运行期产物,
+# 由 app/services/retention.py 按保留策略清理,不进版本库。
+backend/static/images/
+backend/static/spills/
 backend/static/uploads/
 uploads/
 
@@ -28,6 +31,9 @@ dev.log
 
 # misc
 .DS_Store
+
+# 一次性验证/构建产物(如 web/.zz-out*)：验证脚本用完即弃,不进版本库
+web/.zz-out*
 Thumbs.db
 .idea/
 .vscode/

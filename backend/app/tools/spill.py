@@ -15,6 +15,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 from app.core.config import get_settings
+from app.services import retention
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,9 @@ def spill_dir() -> Path:
 def save(text: str) -> str | None:
     """把文本落盘,返回 spill_id;失败返回 None。"""
     try:
+        # 落盘前顺带清理过期产物(带节流,默认一小时最多真跑一次,见 services/retention.py):
+        # spill 目录只增不减,而这里正是它唯一的写入点。
+        retention.maybe_purge()
         sid = uuid.uuid4().hex
         (spill_dir() / f"{sid}.txt").write_text(text, encoding="utf-8")
         return sid
