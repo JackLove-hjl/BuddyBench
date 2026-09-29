@@ -77,6 +77,33 @@ class Provider(Base):
     __table_args__ = (Index("idx_providers_user_name", "user_id", "name", unique=True),)
 
 
+class Feedback(Base):
+    """用户对某条回复的评价(👍 / 👎;👎 可带问题分类与详情)。
+
+    纯记录:不参与 agent 上下文,也不会回灌给模型 —— 它的用途是后续人工排查。
+    同一用户对同一条消息只保留一条记录(再次评价覆盖上一次),避免连点产生重复数据。
+    """
+
+    __tablename__ = "feedback"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    # 反馈所处的对话与消息。会话/消息将来可能被删除,故不设外键、允许为空
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    message_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    rating: Mapped[str] = mapped_column(String(10))  # good | bad
+    # 问题分类标签(可多选):["任务结果", "稳定性和速度", ...]
+    categories: Mapped[list] = mapped_column(JSONB, default=list)
+    detail: Mapped[str] = mapped_column(Text, default="")
+    # 提交时的上下文快照(模型名等),便于复现
+    meta: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (Index("idx_feedback_user_message", "user_id", "message_id"),)
+
+
 class Message(Base):
     __tablename__ = "messages"
 
