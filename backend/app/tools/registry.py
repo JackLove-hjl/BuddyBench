@@ -21,9 +21,14 @@ from pathlib import Path
 
 from langchain_core.tools import BaseTool
 
+from app.tools import specs
 from app.tools.ask_user import make_ask_user_tools
 from app.tools.code_exec import make_run_python_code
+from app.tools.computer import COMPUTER_TOOL_NAME, make_computer_tool
+from app.tools.context_budget import CONTEXT_TOOL_NAME, make_context_tools
+from app.tools.env_wait import WAIT_TOOL_NAME, make_env_tools
 from app.tools.filesystem import make_filesystem_tools
+from app.tools.permissions import PERMISSION_FULL_ACCESS
 from app.tools.plan import make_plan_tools
 from app.tools.shell import make_run_shell_command
 from app.tools.spill import make_read_spill_tool
@@ -44,6 +49,12 @@ class ToolContext:
     tavily_api_key: str = ""
     # 计划模式:决定计划相关工具组是否装配(见 ToolGroup.enabled)
     plan_mode: bool = False
+    # computer use(模型操作电脑):仅在「全部权限」档且开关打开时装配
+    computer_use_enabled: bool = False
+    computer_use_max_width: int = 1280
+    computer_use_image_format: str = "jpeg"
+    computer_use_jpeg_quality: int = 80
+    computer_use_action_interval: float = 0.4
 
 
 @dataclass(frozen=True)
@@ -90,6 +101,10 @@ class ToolRegistry:
         """已注册的全部工具名。"""
         return frozenset(name for group in self._groups.values() for name in group.tools)
 
+    def groups(self) -> tuple[ToolGroup, ...]:
+        """已注册的工具组(注册顺序),供一致性校验与展示使用。"""
+        return tuple(self._groups.values())
+
     def mutating_names(self) -> tuple[str, ...]:
         """会产生副作用的工具名(人工审批清单的唯一来源)。"""
         return tuple(name for group in self._groups.values() for name in group.mutating)
@@ -107,6 +122,10 @@ class ToolRegistry:
                     f"工具组 {group.key} 的产出与声明不一致:"
                     f"{sorted(produced)} != {sorted(group.tools)}"
                 )
+            # 把 spec 里的参数说明写进 schema:`@tool` 默认不解析 docstring 的参数段,
+            # 不写这一步模型侧拿到的参数就是"无说明"的(见 tools/specs.py 模块文档)。
+            for tool in tools:
+                specs.apply_param_docs(tool)
             built.extend(tools)
         return built
 
@@ -147,6 +166,45 @@ def _register_builtin() -> None:
     )
     registry.register(
         ToolGroup(
+            key="computer",
+            tools=(COMPUTER_TOOL_NAME,),
+            # 真实控制鼠标键盘 → 计入审批清单(每轮首次调用挂起一次);
+            # 也正因为进了 mutating,计划模式下它会自动被摘掉。
+            mutating=(COMPUTER_TOOL_NAME,),
+            # 只在「全部权限」档装配:它绕过工作区边界去操作整个桌面,低档位不该给
+            enabled=lambda c: c.computer_use_enabled and c.permission == PERMISSION_FULL_ACCESS,
+            build=lambda c: [
+                make_computer_tool(
+                    c.image_dir,
+                    permission=c.permission,
+                    enabled=c.computer_use_enabled,
+                    max_width=c.computer_use_max_width,
+                    image_format=c.computer_use_image_format,
+                    jpeg_quality=c.computer_use_jpeg_quality,
+                    action_interval=c.computer_use_action_interval,
+                )
+            ],
+        )
+    )
+    registry.register(
+        ToolGroup(
+            key="context",
+            tools=(CONTEXT_TOOL_NAME,),
+            # 只读、无副作用,也没有装配前提:所有权限档位与计划模式都能用。
+            # 计划阶段同样需要知道还剩多少上下文(它决定"还能探索多久")。
+            build=lambda _c: list(make_context_tools()),
+        )
+    )
+    registry.register(
+        ToolGroup(
+            key="env",
+            tools=(WAIT_TOOL_NAME,),
+            # 只读、无副作用:所有权限档位与计划模式都装配(等构建产物 / dev server 就绪)
+            build=lambda _c: list(make_env_tools()),
+        )
+    )
+    registry.register(
+        ToolGroup(
             key="web",
             tools=("web_search", "web_fetch"),
             build=lambda c: list(make_web_tools(c.tavily_api_key)),
@@ -182,3 +240,10 @@ def _register_builtin() -> None:
 
 
 _register_builtin()
+
+# 启动即校验:specs 与注册表必须一一对应。工具加了忘登记 spec、spec 指向已删除的工具、
+# 组名写错,都在**导入时**报错,而不是等运行时提示词里静默少一条引导。
+# (只校验内置注册表:测试可以自行构造独立 ToolRegistry 而不登记 spec。)
+_SPEC_PROBLEMS = specs.validate_against(registry)
+if _SPEC_PROBLEMS:
+    raise ValueError("工具 spec 与注册表不一致:" + ";".join(_SPEC_PROBLEMS))

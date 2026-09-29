@@ -62,11 +62,17 @@ def make_run_shell_command(permission: str, workspace_root: str | None, timeout:
         - 请把命令写为单条(可用 && 串联);不支持交互式命令。
         - 输出会截断,过长输出请自行过滤(grep/head)。
         """
-        permission_gate(permission, need_shell=True)
-        # workspace_writable 强制 cwd 落在工作区内
-        cwd: str | None = None
-        if workspace_root:
-            cwd = str(resolve_workspace_path(".", workspace_root))
+        # 权限门与 cwd 解析必须在 try 里:它们也会抛 PermissionDenied(只读档位、路径越界),
+        # 放在外面会让异常直接冒出去 —— 而 docstring 承诺的是"返回权限错误"。
+        # (实测踩过:三个写类工具里只有这个会抛异常,模型侧看到的是异常而不是可读原因)
+        try:
+            permission_gate(permission, need_shell=True)
+            # workspace_writable 强制 cwd 落在工作区内
+            cwd: str | None = None
+            if workspace_root:
+                cwd = str(resolve_workspace_path(".", workspace_root))
+        except PermissionDenied as e:
+            return json_result("error", exit_code=None, error=e.message)
 
         global _proc
 
