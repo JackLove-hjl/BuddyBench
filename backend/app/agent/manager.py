@@ -17,7 +17,8 @@ from app.agent.graph import build_agent
 from app.agent.prompts import build_system_prompt
 from app.core.registry import ModelRegistry
 from app.tools.ask_user import ASK_USER_TOOL_NAME
-from app.tools.permissions import PERMISSION_WORKSPACE_WRITABLE
+from app.tools.computer import COMPUTER_TOOL_NAME
+from app.tools.permissions import PERMISSION_FULL_ACCESS, PERMISSION_WORKSPACE_WRITABLE
 from app.tools.plan import PLAN_TOOL_NAME
 from app.tools.registry import ToolContext
 from app.tools.registry import registry as tool_registry
@@ -56,6 +57,14 @@ class AgentManager:
         capacity: int = AGENT_CAPACITY,
         loop_window: int = 12,
         loop_repeats: int = 3,
+        computer_use_enabled: bool = True,
+        computer_use_max_actions: int = 40,
+        computer_use_action_interval: float = 0.4,
+        computer_use_max_width: int = 1280,
+        computer_use_image_format: str = "jpeg",
+        computer_use_jpeg_quality: int = 80,
+        context_window_default: int = 256000,
+        compact_trigger_fraction: float = 0.7,
     ):
         self._registry = registry
         self._checkpointer = checkpointer
@@ -65,6 +74,14 @@ class AgentManager:
         self._tavily_api_key = tavily_api_key
         self._loop_window = loop_window
         self._loop_repeats = loop_repeats
+        self._computer_use_enabled = computer_use_enabled
+        self._computer_use_max_actions = computer_use_max_actions
+        self._computer_use_action_interval = computer_use_action_interval
+        self._computer_use_max_width = computer_use_max_width
+        self._computer_use_image_format = computer_use_image_format
+        self._computer_use_jpeg_quality = computer_use_jpeg_quality
+        self._context_window_default = context_window_default
+        self._compact_trigger_fraction = compact_trigger_fraction
         self._lru: OrderedDict[str, object] = OrderedDict()
         self._capacity = capacity
         # 已同步的 registry 配置代数(见 ModelRegistry.generation)
@@ -84,6 +101,9 @@ class AgentManager:
                 {
                     name: {"allowed_decisions": ["approve", "reject"]}
                     for name in tool_registry.mutating_names()
+                    # computer use 的审批由 ComputerUseMiddleware 自己做(每轮仅首次),
+                    # 不走 HITL:否则同一个调用会被两处拦,还会逐次弹卡。
+                    if name != COMPUTER_TOOL_NAME
                 }
             )
         if plan_mode:
@@ -109,6 +129,11 @@ class AgentManager:
                 code_exec_timeout=self._code_exec_timeout,
                 tavily_api_key=self._tavily_api_key,
                 plan_mode=plan_mode,
+                computer_use_enabled=self._computer_use_enabled,
+                computer_use_max_width=self._computer_use_max_width,
+                computer_use_image_format=self._computer_use_image_format,
+                computer_use_jpeg_quality=self._computer_use_jpeg_quality,
+                computer_use_action_interval=self._computer_use_action_interval,
             )
         )
         if hidden:
@@ -143,11 +168,29 @@ class AgentManager:
         hidden = plan_mode_hidden_tools(plan_mode)
         tools = self._build_tools(permission, workspace_root, plan_mode, hidden)
 
+        # computer use / 上下文窗口 / 审批缓存三个派生根:
+        # 判定条件都只写在**一个地方**(工具组、压缩阈值、审批清单),避免两边各写一份。
+        computer_active = (
+            self._computer_use_enabled and permission == PERMISSION_FULL_ACCESS and not plan_mode
+        )
+        context_window = self._registry.context_window(model_id, self._context_window_default)
+        approval_tools = (
+            frozenset(tool_registry.mutating_names()) - {COMPUTER_TOOL_NAME}
+            if permission == APPROVAL_PERMISSION
+            else frozenset()
+        )
+
         # 动态 system prompt(persona + 工具引导 + 权限边界 [+ 计划模式]);
         # hidden 一并传入,让"没装配的工具"在提示词里也不出现
         model_name = model_id.split("::")[-1] if "::" in model_id else model_id
         system_prompt = build_system_prompt(
-            model_name, permission, workspace_root, plan_mode, hidden
+            model_name,
+            permission,
+            workspace_root,
+            plan_mode,
+            hidden,
+            # 引导与工具装配条件必须一致(见 prompts.build_system_prompt 文档)
+            computer_use_enabled=self._computer_use_enabled,
         )
 
         agent = build_agent(
@@ -155,10 +198,21 @@ class AgentManager:
             tools=tools,
             system_prompt=system_prompt,
             checkpointer=self._checkpointer,
+            image_dir=self._image_dir,
             # 指定权限档位下,危险操作执行前挂起等待人工批准/拒绝;计划模式下计划评审也挂起
             interrupt_on=self._approval_config(permission, plan_mode),
             loop_window=self._loop_window,
             loop_repeats=self._loop_repeats,
+            # computer use 的**装配条件与工具组完全一致**(见 registry 的 computer 组 enabled):
+            # 以前这里只看开关,于是只读/计划模式下"工具没装配但中间件还在"(虽无害但两边不一致)
+            computer_use_enabled=computer_active,
+            computer_use_max_actions=self._computer_use_max_actions,
+            # 上下文预算:让模型能查"还剩多少",数值口径与自动压缩一致
+            context_window=context_window,
+            compact_trigger_fraction=self._compact_trigger_fraction,
+            # 审批缓存只对"需要审批的工具"生效(与 _approval_config 同一份清单,去掉 computer)
+            approval_tools=approval_tools,
+            workspace_root=workspace_root,
         )
         self._lru[key] = agent
         self._lru.move_to_end(key)

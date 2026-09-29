@@ -26,6 +26,9 @@ from typing import TYPE_CHECKING, Any
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain_core.messages import AIMessage, ToolMessage
 
+from app.agent import fragments
+from app.agent.tool_calls import signature
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -35,16 +38,21 @@ if TYPE_CHECKING:
 EXEMPT_TOOLS = frozenset({"ask_user", "exit_plan_mode"})
 
 MAX_ARG_PREVIEW = 200
-_GUARD_MARKER = "loop_guard"  # 用来把"守卫自己写回的结果"与真实工具结果区分开
+# 守卫写回的结果属于"注入片段"(见 agent/fragments.py):重复调用记 loop_guard.repeat,
+# 连续点空记 loop_guard.stalled。识别一律走 fragments —— 改文案不会让判定静默失效,
+# 历史里旧会话存的 "loop_guard" 结果也仍然认得出来(旧文案登记在片段的 legacy 里)。
+_GUARD_KINDS = ("loop_guard.repeat", "loop_guard.stalled")
 
-
-def _signature(name: str, args: Any) -> str:
-    """调用签名:工具名 + 规范化参数(sort_keys 避免键顺序不同被判成两次不同调用)。"""
-    try:
-        dumped = json.dumps(args or {}, ensure_ascii=False, sort_keys=True, default=str)
-    except (TypeError, ValueError):
-        dumped = repr(args)
-    return f"{name}::{dumped}"
+# --- computer use 专用规则 -------------------------------------------------
+# 上一条规则(同名同参 + 结果相同)对电脑操作**结构性失效**:每次点击坐标都不同,
+# 结果里还带着新截图,两头都判不出来。
+# 但电脑操作有一条更本质的进展信号:做过动作后**画面有没有变化**。
+# 工具层已经把它回传成 `screen_changed`,这里据此判定"连续点空"。
+COMPUTER_TOOL_NAME = "computer"
+# 只有这些动作"应该"改变画面;截图/等待是"先看清"的正确做法,不在其中
+SCREEN_ACTIONS = frozenset({"click", "double_click", "right_click", "type", "keypress", "drag"})
+# 连续多少次"没生效"就拦(含本次)
+STALLED_ACTIONS_LIMIT = 3
 
 
 def _result_text(message: Any) -> str:
@@ -68,7 +76,7 @@ def _recent_calls(messages: list[Any], window: int) -> list[tuple[str, str, str]
                 call_id = str(call.get("id") or "")
                 if not call_id:
                     continue
-                signatures[call_id] = _signature(str(call.get("name") or ""), call.get("args"))
+                signatures[call_id] = signature(str(call.get("name") or ""), call.get("args"))
                 order.append(call_id)
         elif isinstance(message, ToolMessage):
             call_id = str(getattr(message, "tool_call_id", "") or "")
@@ -81,7 +89,31 @@ def _recent_calls(messages: list[Any], window: int) -> list[tuple[str, str, str]
 
 def _is_guard_result(text: str) -> bool:
     """判断某次调用的结果是否是守卫自己写回的提示(这类结果不参与"结果是否相同"的比较)。"""
-    return _GUARD_MARKER in text
+    return any(fragments.contains(text, kind) for kind in _GUARD_KINDS)
+
+
+def _stalled_computer_streak(messages: list[Any], window: int) -> int:
+    """最近的连续"没生效"电脑操作次数。
+
+    只看**已执行完**的 computer 调用:结果里 action 属于 SCREEN_ACTIONS 且 screen_changed=false
+    才算一次"点空";遇到截图/等待(说明模型在正确地对齐状态)、失败结果或链条断裂就停止计数。
+    """
+    streak = 0
+    for _cid, sig, text in reversed(_recent_calls(messages, max(window, 12))):
+        if not sig.startswith(f"{COMPUTER_TOOL_NAME}::") or not text or _is_guard_result(text):
+            break
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError):
+            break
+        if not isinstance(payload, dict) or payload.get("status") != "ok":
+            break
+        if payload.get("action") not in SCREEN_ACTIONS:
+            break
+        if payload.get("screen_changed") is not False:
+            break
+        streak += 1
+    return streak
 
 
 class LoopGuardMiddleware(AgentMiddleware[Any, Any, Any]):
@@ -101,13 +133,13 @@ class LoopGuardMiddleware(AgentMiddleware[Any, Any, Any]):
             return None
         state = getattr(request, "state", None) or {}
         messages = state.get("messages") or []
-        signature = _signature(name, tool_call.get("args"))
+        target = signature(name, tool_call.get("args"))
         current_id = str(tool_call.get("id") or "")
         # 排除本次调用:它的结果还没产生(空串),混进来会把"结果是否相同"的比较判坏
         prior = [
             text
             for cid, sig, text in _recent_calls(messages, self._window)
-            if cid != current_id and sig == signature
+            if cid != current_id and sig == target
         ]
         count = len(prior) + 1  # +1 = 本次
         if count < self._repeats:
@@ -138,11 +170,39 @@ class LoopGuardMiddleware(AgentMiddleware[Any, Any, Any]):
             "请直接说明你需要什么。"
         )
         return ToolMessage(
-            content=json.dumps(
-                {"status": "error", "reason": _GUARD_MARKER, "error": hint}, ensure_ascii=False
-            ),
+            content=fragments.tool_error("loop_guard.repeat", hint),
             tool_call_id=str(tool_call.get("id") or ""),
             name=name,
+            status="error",
+        )
+
+    def _stalled_blocked(self, request: ToolCallRequest) -> ToolMessage | None:
+        """computer 专用:连续点空时拦住"再点一次",强制模型先看清状态。"""
+        tool_call = getattr(request, "tool_call", None) or {}
+        if str(tool_call.get("name") or "") != COMPUTER_TOOL_NAME:
+            return None
+        args = tool_call.get("args") or {}
+        action = str(args.get("action") or "").strip().lower()
+        if action not in SCREEN_ACTIONS:
+            return None  # 截图 / 等待是"先看清楚"的正确动作,永远放行
+        state = getattr(request, "state", None) or {}
+        streak = _stalled_computer_streak(state.get("messages") or [], STALLED_ACTIONS_LIMIT)
+        if streak < STALLED_ACTIONS_LIMIT:
+            return None
+        hint = (
+            f"已跳过本次 computer({action}):最近连续 {streak} 次电脑操作之后,屏幕画面**没有任何变化** —— "
+            "说明这些动作都没有真正生效,原样再点一次不会得到不同结果。\n"
+            "请先 action=\"screenshot\" 看清现状,并重点确认结果里的 foreground_window(前台窗口):\n"
+            "1) 若前台窗口不是你要操作的应用:先点击该窗口一次(激活它),再点目标元素 —— "
+            "Windows 下点击后台窗口通常只是把它切到前台;\n"
+            "2) 若坐标不确定:必须以最近一次截图返回的 coordinate_space(已缩放坐标系)重新给坐标;\n"
+            "3) 若目标应用响应慢:用 action=\"wait\" 等 1~2 秒再截图;\n"
+            "4) 若以上都无效,不要再空点:直接说明当前卡在哪一步、需要用户做什么(例如由用户手动切窗口)。"
+        )
+        return ToolMessage(
+            content=fragments.tool_error("loop_guard.stalled", hint),
+            tool_call_id=str(tool_call.get("id") or ""),
+            name=COMPUTER_TOOL_NAME,
             status="error",
         )
 
@@ -154,6 +214,9 @@ class LoopGuardMiddleware(AgentMiddleware[Any, Any, Any]):
         handler: Callable[[ToolCallRequest], ToolMessage | Any],
     ) -> ToolMessage | Any:
         """同步路径:命中守卫时直接返回提示,不执行工具。"""
+        blocked = self._stalled_blocked(request)
+        if blocked is not None:
+            return blocked
         count = self._detect(request)
         if count is not None:
             return self._blocked(request, count)
@@ -165,6 +228,9 @@ class LoopGuardMiddleware(AgentMiddleware[Any, Any, Any]):
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Any]],
     ) -> ToolMessage | Any:
         """异步路径(图实际走这条):命中守卫时直接返回提示,不执行工具。"""
+        blocked = self._stalled_blocked(request)
+        if blocked is not None:
+            return blocked
         count = self._detect(request)
         if count is not None:
             return self._blocked(request, count)

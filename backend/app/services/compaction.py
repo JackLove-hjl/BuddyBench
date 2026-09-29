@@ -14,6 +14,7 @@ from langchain_core.messages import SystemMessage
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent import fragments
 from app.core.registry import ModelRegistry
 from app.db.checkpointer import get_checkpointer
 from app.db.models import Conversation, Message
@@ -45,18 +46,24 @@ _OVERFLOW_MARKERS = (
 
 
 def messages_to_text(messages) -> str:
-    """把消息序列化为文本(多模态取 text 部分),用于生成摘要。"""
+    """把消息序列化为文本(多模态取 text 部分),用于生成摘要。
+
+    注入片段要做两件处理(见 agent/fragments.py):
+    - 去掉 `[ctx:...]` 机器标记:摘要正文里不该混进这些;
+    - 屏幕截图整段折叠成一句"屏幕截图,已省略":它的正文只是坐标说明,占位置又没信息。
+    """
     parts: list[str] = []
     for m in messages:
         role = getattr(m, "type", "message")
         content = getattr(m, "content", "")
         if isinstance(content, list):
-            content = " ".join(
+            texts = " ".join(
                 str(b.get("text", ""))
                 for b in content
                 if isinstance(b, dict) and b.get("type") == "text"
             )
-        text = str(content).strip()
+            content = "(屏幕截图,已省略)" if fragments.contains(texts, "computer.screen") else texts
+        text = fragments.strip_tags(str(content)).strip()
         if not text or text in ("[发送] 压缩上下文",):
             continue
         parts.append(f"<{role}> {text}")

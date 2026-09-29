@@ -27,8 +27,11 @@ from typing import Any
 from langchain.agents import create_agent
 from langchain.agents.middleware import HumanInTheLoopMiddleware, TodoListMiddleware
 
+from app.agent.approval_cache import ApprovalCacheMiddleware
+from app.agent.budget import ContextBudgetMiddleware
 from app.agent.loop_guard import LoopGuardMiddleware
-from app.agent.middleware import PatchDanglingToolCallsMiddleware
+from app.agent.middleware import ComputerUseMiddleware, PatchDanglingToolCallsMiddleware
+from app.agent.turn_changes import TurnChangesMiddleware
 
 # 待办清单的工具引导(替换 langchain 自带的英文默认值,与项目提示词的语言保持一致)
 TODO_SYSTEM_PROMPT = """## `write_todos`
@@ -44,24 +47,52 @@ def build_agent(
     tools: list[Any],
     system_prompt: str,
     checkpointer: Any,
+    image_dir: Any,
     interrupt_on: dict | None = None,
     loop_window: int = 12,
     loop_repeats: int = 3,
+    computer_use_enabled: bool = False,
+    computer_use_max_actions: int = 40,
+    context_window: int = 0,
+    compact_trigger_fraction: float = 0.7,
+    approval_tools: frozenset[str] = frozenset(),
+    workspace_root: str | None = None,
     name: str | None = None,
 ):
     """按会话上下文建图:模型 + 我们的工具集 + 显式装配的中间件。
 
     中间件顺序(= 由外到内):
-      1. 悬空工具调用修补 —— 进模型前把"没有结果的工具调用"补齐;
-      2. 循环守卫 —— 同名同参且结果相同的重复调用直接跳过并提示模型换策略;
-      3. 待办清单 —— 提供 write_todos;
-      4. 人工审批 —— 危险操作 / 计划评审 / 需求澄清的挂起点(放最内层,最后拦)。
+      1. computer use 护栏 —— 每轮首次调用挂起审批、拒绝后短路、动作上限、
+         并在进模型前把屏幕截图内联进去(仅在该工具装配时加入);
+      2. 悬空工具调用修补 —— 进模型前把"没有结果的工具调用"补齐;
+      3. 本轮改动清单 —— 进模型前注入"这一轮改了哪些文件"(有变化才注入);
+      4. 循环守卫 —— 同名同参且结果相同的重复调用直接跳过并提示模型换策略;
+      5. 上下文预算 —— 应答 get_context_remaining(模型可主动查剩余上下文);
+      6. 待办清单 —— 提供 write_todos;
+      7. 审批缓存 —— 本轮内已成功执行过的同名同参调用不再重复挂审批(仅审批开启时);
+      8. 人工审批 —— 危险操作 / 计划评审 / 需求澄清的挂起点(放最内层,最后拦)。
     """
-    middleware: list[Any] = [
-        PatchDanglingToolCallsMiddleware(),
-        LoopGuardMiddleware(window=loop_window, repeats=loop_repeats),
-        TodoListMiddleware(system_prompt=TODO_SYSTEM_PROMPT),
-    ]
+    middleware: list[Any] = []
+    if computer_use_enabled:
+        middleware.append(
+            ComputerUseMiddleware(image_dir=image_dir, max_actions=computer_use_max_actions)
+        )
+    middleware.extend(
+        [
+            PatchDanglingToolCallsMiddleware(),
+            TurnChangesMiddleware(workspace_root=workspace_root),
+            LoopGuardMiddleware(window=loop_window, repeats=loop_repeats),
+            ContextBudgetMiddleware(
+                context_window=context_window,
+                trigger_fraction=compact_trigger_fraction,
+                system_prompt=system_prompt,
+            ),
+            TodoListMiddleware(system_prompt=TODO_SYSTEM_PROMPT),
+        ]
+    )
+    if approval_tools:
+        # 必须放在审批中间件**外面**:命中缓存时由它直接执行工具,从而跳过内层审批
+        middleware.append(ApprovalCacheMiddleware(tools=approval_tools))
     if interrupt_on:
         middleware.append(HumanInTheLoopMiddleware(interrupt_on=interrupt_on))
     return create_agent(

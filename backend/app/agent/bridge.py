@@ -7,13 +7,17 @@
 A4 增强:tool 事件补充 started_at / duration_ms / exit_code / ok 字段。
 """
 import json
+import logging
 import time
 from collections.abc import AsyncIterator
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.types import Command
 
+from app.agent import fragments
 from app.agent.tool_display import ToolArgsStreamer, build_tool_payload
+
+logger = logging.getLogger(__name__)
 
 # 主 agent 的模型节点(实测确认);本项目禁用 task 子代理,不会出现子图模型事件
 MAIN_MODEL_NODE = "model"
@@ -25,16 +29,45 @@ EVENT_TRUNCATE = 500
 _tool_timers: dict[str, float] = {}
 
 
-def _truncate(obj) -> str:
-    """对象转展示字符串;ToolMessage 等不可序列化对象退化为 str()。"""
-    if isinstance(obj, str):
-        s = obj
-    else:
+def _raw_text(obj) -> str:
+    """对象转完整展示字符串(未截断)。
+
+    `on_tool_end` 的 output 是 **ToolMessage**(ToolNode 的产物):直接 `str()` 会得到
+    `content='{…}' name='…' tool_call_id='…'` 这种 Python repr —— 前端 `JSON.parse`
+    解析不了,工具结果里的结构化字段(如 computer 的 image / coordinate_space、
+    shell 的 exit_code)就全丢了。所以先取出正文。
+    """
+    if isinstance(obj, ToolMessage):
+        content = obj.content
+        if isinstance(content, str):
+            return content
         try:
-            s = json.dumps(obj, ensure_ascii=False)
+            return json.dumps(content, ensure_ascii=False)
         except (TypeError, ValueError):
-            s = str(obj)
+            return str(content)
+    if isinstance(obj, str):
+        return obj
+    try:
+        return json.dumps(obj, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(obj)
+
+
+def _truncate(obj) -> str:
+    """展示用:剥掉注入片段的机器标记后截断。
+
+    前端会原样渲染工具结果(工具卡里的错误文案就是它),而循环守卫等注入片段的正文里
+    带着 `[ctx:loop_guard.repeat]` 这类标记 —— 那是给模型看的类型标记,不该出现在界面上。
+    只影响展示:模型侧读到的仍是完整带标记的原文。
+    """
+    s = fragments.strip_tags(_raw_text(obj))
     return s if len(s) <= EVENT_TRUNCATE else s[:EVENT_TRUNCATE] + "…"
+
+
+def _call_id(ev: dict) -> str:
+    """本次工具调用的 id(用于遥测配对;拿不到就退回 run_id)。"""
+    output = (ev.get("data") or {}).get("output")
+    return str(getattr(output, "tool_call_id", "") or ev.get("run_id", "") or "")
 
 
 def sse(event: str, data: dict) -> str:
@@ -236,8 +269,8 @@ async def translate(
                 if payload:
                     start_record["payload"] = payload
                 tool_sink.append(start_record)
-                if timeline_sink is not None:
-                    timeline_sink.append({"kind": "tool", "call": tool_sink[-1]})
+                # 只 append 一次:这里曾经重复 append,导致同一次工具调用在时间线里出现两张
+                # 一模一样的卡(前端渲染时"卡片在结尾又重复了一次")
                 if timeline_sink is not None:
                     timeline_sink.append({"kind": "tool", "call": tool_sink[-1]})
             yield sse("tool", data)
@@ -249,6 +282,15 @@ async def translate(
             started = _tool_timers.pop(timer_key, None)
             duration_ms = int((time.monotonic() - started) * 1000) if started is not None else None
             result = _truncate(ev["data"]["output"])
+            # 遥测只记"谁、多快、成没成":不含参数与输出内容(与 codex 的 call_trace 一致)。
+            # 需要看内容时走工具卡 / 事件流,日志里不留业务的原文。
+            logger.info(
+                "tool_call name=%s call_id=%s duration_ms=%s ok=%s",
+                ev["name"],
+                _call_id(ev),
+                duration_ms,
+                _result_ok(_raw_text(ev["data"]["output"])),
+            )
             data = {
                 "type": "tool",
                 "name": ev["name"],

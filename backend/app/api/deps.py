@@ -90,5 +90,14 @@ def get_agent_manager() -> AgentManager:
             tavily_api_key=get_settings().tavily_api_key,
             loop_window=get_settings().tool_loop_guard_window,
             loop_repeats=get_settings().tool_loop_guard_repeats,
+            computer_use_enabled=get_settings().computer_use_enabled,
+            computer_use_max_actions=get_settings().computer_use_max_actions,
+            computer_use_action_interval=get_settings().computer_use_action_interval,
+            computer_use_max_width=get_settings().computer_use_max_image_width,
+            computer_use_image_format=get_settings().computer_use_image_format,
+            computer_use_jpeg_quality=get_settings().computer_use_jpeg_quality,
+            # 上下文预算工具与自动压缩共用同一组数值(默认窗口 / 触发比例)
+            context_window_default=get_settings().context_window_default,
+            compact_trigger_fraction=get_settings().compact_trigger_fraction,
         )
     return _agent_manager
