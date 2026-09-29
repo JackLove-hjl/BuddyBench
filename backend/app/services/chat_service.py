@@ -10,30 +10,35 @@ checkpointer 无该线程历史时,从 DB 回放最近 N 条消息兜底。
    批准后由 `/api/chat/approve` 用 `Command(resume=...)` 从中断点继续
 """
 import base64
+import logging
 import mimetypes
 import re
+import time
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent import bridge
+from app.agent import bridge, fragments
 from app.core.config import get_settings
 from app.core.registry import ModelRegistry
 from app.db.models import Conversation, Message
 from app.schemas.chat import ChatRequest
 from app.services import compaction
+from app.services.images import image_url_to_data_url
 
-IMAGE_RE = re.compile(r"/images/[0-9a-fA-F-]{36}\.png")
+logger = logging.getLogger(__name__)
+
+IMAGE_RE = re.compile(r"/images/[0-9a-fA-F-]{36}\.(?:png|jpe?g|webp)")
 
 
 class _StreamState:
     """一次流式请求的可变累积状态(供桥接层写入、结束后统一落库)。"""
 
-    def __init__(self, model: str) -> None:
+    def __init__(self, model: str, prior_active_ms: int = 0) -> None:
         self.model = model
         self.content_parts: list[str] = []
         self.usage: dict = {}
@@ -43,6 +48,15 @@ class _StreamState:
         self.timeline: list[dict] = []
         self.events: list[dict] = []
         self.error: str | None = None
+        # 本轮"干活"用时:本次请求之前已累计的部分(审批续跑时从上一段挂起消息里取),
+        # 加上本次请求从进来到现在的时间。等待用户审批的那段没有任何请求在跑,
+        # 因此天然不计入 —— 这正是"用时"该有的口径。
+        self.prior_active_ms = max(0, int(prior_active_ms))
+        self.started_at = time.monotonic()
+
+    def active_ms(self) -> int:
+        """截至此刻本轮的干活用时。"""
+        return self.prior_active_ms + int((time.monotonic() - self.started_at) * 1000)
 
 
 async def _touch_conversation(session: AsyncSession, conversation_id: uuid.UUID) -> None:
@@ -64,6 +78,8 @@ async def _save_assistant(
     segments: list[dict] | None = None,
     events: list[dict] | None = None,
     approval: dict | None = None,
+    active_ms: int | None = None,
+    duration_ms: int | None = None,
 ) -> Message:
     content = "".join(content_parts)
     meta: dict = {
@@ -88,6 +104,12 @@ async def _save_assistant(
         meta["usage"] = usage
     if error:
         meta["error"] = error
+    # 中间挂起(等审批)的消息记 active_ms:续跑时以此续算本轮干活用时
+    if active_ms is not None:
+        meta["active_ms"] = active_ms
+    # 本轮收尾的消息记 duration_ms:前端在消息底部显示"用时 X 秒",刷新后仍在
+    if duration_ms is not None:
+        meta["duration_ms"] = duration_ms
     msg = Message(
         conversation_id=conversation_id,
         role="assistant",
@@ -100,6 +122,35 @@ async def _save_assistant(
     await session.commit()
     await session.refresh(msg)
     return msg
+
+
+async def _prior_active_ms(session: AsyncSession, conversation_id: uuid.UUID) -> int:
+    """续跑时取本轮已累计的干活用时(ms)。
+
+    中断处的 assistant 消息会写上 meta.active_ms(那一条同时带着 pending_approval)。
+    只认**最后一条用户消息之后**的那条:更早的属于上一轮,不能接着累加。
+    """
+    last_user_at = await session.scalar(
+        select(Message.created_at)
+        .where(Message.conversation_id == conversation_id, Message.role == "user")
+        .order_by(Message.created_at.desc())
+        .limit(1)
+    )
+    row = (
+        await session.execute(
+            select(Message.meta, Message.created_at)
+            .where(Message.conversation_id == conversation_id, Message.role == "assistant")
+            .order_by(Message.created_at.desc())
+            .limit(1)
+        )
+    ).first()
+    if row is None:
+        return 0
+    meta, created_at = row
+    if last_user_at is not None and created_at < last_user_at:
+        return 0  # 最后一条 assistant 属于上一轮,本轮从零开始
+    value = (meta or {}).get("active_ms")
+    return int(value) if isinstance(value, (int, float)) and value > 0 else 0
 
 
 def _graph_config(conversation_id: uuid.UUID) -> dict:
@@ -144,9 +195,18 @@ def _build_text_prompt(req: ChatRequest) -> str:
 
 
 def _image_to_base64(url: str) -> str | None:
-    """把指向本机 uploads 的图片 URL 转成 base64 data URL;失败(文件缺失/过大)返回 None。"""
+    """把指向本机的图片 URL 转成 base64 data URL;失败(文件缺失/过大)返回 None。
+
+    覆盖两类本机图片:
+    - `/images/<uuid>.jpg|.png` —— 绘图与 computer use 的屏幕截图(落在 image_dir);
+    - `/uploads/images/<uid>/<name>` —— 用户上传的图片附件。
+    """
     if url.startswith("data:"):
         return url  # 已是 base64
+    # computer use 截图 / 绘图产物:/images/ 下平铺的 uuid 文件名
+    converted = image_url_to_data_url(url, Path(get_settings().image_dir))
+    if converted:
+        return converted
     m = re.search(r"/uploads/images/([0-9a-fA-F-]+)/([^?#\s]+)", url)
     if not m:
         return None
@@ -219,7 +279,14 @@ async def _build_history(
                 if exclude_id is not None
                 else []
             )
-            return [SystemMessage(content=f"[先前对话摘要]\n{summary}"), *recent]
+            # 摘要是**系统注入的片段**(带类型标记),这样历史里能认出"这不是用户说过的话"
+            # —— 需要按类型过滤/替换注入内容时(见 agent/fragments.py)才有依据。
+            return [
+                SystemMessage(
+                    content=fragments.render("context.summary", f"先前对话摘要:\n{summary}")
+                ),
+                *recent,
+            ]
         if exclude_id is None:
             return []
         return await compaction.load_recent_history(session, conversation_id, exclude_id, 50)
@@ -288,7 +355,7 @@ async def _consume_stream(
                 await _save_assistant(
                     session, conversation_id, st.model, st.content_parts, st.usage,
                     st.tool_calls, message, st.tool_records, "".join(st.reasoning_parts),
-                    st.timeline, st.events,
+                    st.timeline, st.events, duration_ms=st.active_ms(),
                 )
                 return
             ok, new_summary, note = await compaction.compact_conversation_context(
@@ -307,7 +374,7 @@ async def _consume_stream(
                 await _save_assistant(
                     session, conversation_id, st.model, st.content_parts, st.usage,
                     st.tool_calls, st.error, st.tool_records, "".join(st.reasoning_parts),
-                    st.timeline, st.events,
+                    st.timeline, st.events, duration_ms=st.active_ms(),
                 )
                 return
             yield _compact_event(True, new_summary, "上下文超限,已压缩历史后重试", st.timeline)
@@ -322,9 +389,7 @@ async def _consume_stream(
         interrupt_value = bridge.extract_interrupt(await agent.aget_state(config))
     except Exception as e:  # noqa: BLE001  取状态失败视为未中断
         st.error = None
-        import logging
-
-        logging.getLogger(__name__).warning("读取中断状态失败: %s", e)
+        logger.warning("读取中断状态失败: %s", e)
 
     if interrupt_value:
         actions = interrupt_value.get("action_requests") or []
@@ -332,7 +397,8 @@ async def _consume_stream(
         await _save_assistant(
             session, conversation_id, st.model, st.content_parts, st.usage, st.tool_calls,
             None, st.tool_records, "".join(st.reasoning_parts), st.timeline, st.events,
-            approval=interrupt_value,
+            # 挂起消息带上"已干活的用时":批准续跑后从这里接着累加
+            approval=interrupt_value, active_ms=st.active_ms(),
         )
         return
 
@@ -349,9 +415,22 @@ async def _consume_stream(
     except Exception:  # noqa: BLE001  取终态失败不影响主流程
         pass
 
+    duration_ms = st.active_ms()
+    # usage 兜底:部分网关(实测本机配置的 coding plan)流式不返回 usage_metadata,
+    # 前端上下文圆圈就永远是 0,刷新后更无从恢复。用与压缩判定同一套近似计数器估一个,
+    # 让圆圈至少反映真实量级(拿到真实 usage 时不会被覆盖)。
+    if not st.usage.get("prompt_tokens"):
+        try:
+            state_messages = (await agent.aget_state(config)).values.get("messages") or []
+            estimated = compaction.estimate_tokens(state_messages)
+            if estimated:
+                st.usage = {**st.usage, "prompt_tokens": estimated}
+        except Exception as e:  # noqa: BLE001  估算失败不影响主流程
+            logger.warning("估算上下文占用失败: %s", e)
     msg = await _save_assistant(
         session, conversation_id, st.model, st.content_parts, st.usage, st.tool_calls,
         st.error, st.tool_records, "".join(st.reasoning_parts), st.timeline, st.events,
+        duration_ms=duration_ms,
     )
     yield bridge.sse(
         "done",
@@ -361,6 +440,8 @@ async def _consume_stream(
             "model": st.model,
             "images": msg.meta.get("images", []),
             "usage": st.usage,
+            # 本轮干活用时(前端显示在回复底部"用时 X 秒",刷新后从 meta 里读回来)
+            "duration_ms": duration_ms,
             # 用模型自己声明的输入上下文(未配置则回退默认),前端圆圈的分母
             "context_window": registry.context_window(st.model, settings.context_window_default),
         },
@@ -463,7 +544,8 @@ async def start_implementation(
     悬挂的 exit_plan_mode 调用由 PatchToolCallsMiddleware 修补。
     """
     config = _graph_config(conversation_id)
-    st = _StreamState(model)
+    # 计划获批接着实施:本轮用时从计划那一段继续累加(对用户而言是同一轮)
+    st = _StreamState(model, prior_active_ms=await _prior_active_ms(session, conversation_id))
     try:
         async for frame in _consume_stream(
             agent=agent,
@@ -497,7 +579,8 @@ async def resume_chat(
     只发流式事件,不重复落库用户消息(中断处的状态已包含本轮输入)。
     """
     config = _graph_config(conversation_id)
-    st = _StreamState(model)
+    # 审批续跑:接着挂起前的用时累加(等待审批的那段不算)
+    st = _StreamState(model, prior_active_ms=await _prior_active_ms(session, conversation_id))
     try:
         async for frame in _consume_stream(
             agent=agent,
