@@ -4,6 +4,7 @@
 工作区 = 用户本地文件夹的绝对路径,后端校验存在性后直接登记,Agent 工具直接读写该目录。
 浏览器安全模型禁止 JS 读取绝对路径,因此由后端提供目录浏览 API(Windows 盘符 + 目录树)。
 """
+import asyncio
 import ctypes
 import logging
 import os
@@ -14,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
 
+from anyio import to_thread
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -53,6 +55,14 @@ SKIP_DIRS = frozenset(
 
 class WorkspaceSetBody(BaseModel):
     workspace_path: str | None = Field(default=None, max_length=1000)
+
+
+class ExecBody(BaseModel):
+    """侧栏终端里用户敲的一条命令。"""
+
+    command: str = Field(min_length=1, max_length=4000)
+    # 工作区内相对目录(空 = 工作区根)
+    cwd: str = Field(default="", max_length=1000)
 
 
 def _probe_reachable(roots: list[str], timeout: float = DRIVE_PROBE_TIMEOUT) -> set[str]:
@@ -216,13 +226,64 @@ def _list_files(root: Path, rel: str) -> dict:
     }
 
 
+# --- 文件内容缓存与「非阻塞读盘」 ---------------------------------------------
+# 前端每次点开文件都会发一个请求:同一文件被反复开关标签、工具卡来回查看时会重复读盘。
+# 缓存用 (mtime_ns, size) 校验,Agent 改写文件后自动失效 —— 不会出现"看到旧内容"。
+_CONTENT_CACHE: dict[str, tuple[int, int, str]] = {}
+_CONTENT_CACHE_MAX = 32
+# 单文件读取上限(与前端提示一致)
+READ_MAX_BYTES = 512 * 1024
+
+
+def _cached_read_text(target: Path) -> str:
+    """读文本文件;mtime/大小未变则直接返回缓存内容(须在工作线程中调用)。"""
+    st = target.stat()
+    key = str(target)
+    hit = _CONTENT_CACHE.get(key)
+    if hit is not None and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
+        # 命中后挪到末尾,保持「最久没用过的先淘汰」
+        _CONTENT_CACHE.pop(key, None)
+        _CONTENT_CACHE[key] = hit
+        return hit[2]
+    text = target.read_text(encoding="utf-8", errors="replace")
+    _CONTENT_CACHE[key] = (st.st_mtime_ns, st.st_size, text)
+    while len(_CONTENT_CACHE) > _CONTENT_CACHE_MAX:
+        _CONTENT_CACHE.pop(next(iter(_CONTENT_CACHE)))
+    return text
+
+
+def _read_workspace_file_sync(root_path: str, rel: str) -> dict:
+    """解析路径 → 校验 → 读内容(含缓存)。整体在工作线程里跑。
+
+    为什么不直接在 async 端点里写:FastAPI 的 async 端点就跑在事件循环上,而
+    `Path.resolve/stat/read_text` 都是阻塞调用 —— 磁盘慢、目录巨大或工作区在
+    网络盘上时,会把整个后端(包括正在输出的 SSE)一起卡住,用户感受就是
+    "点开文件转圈很久,而且这时别的操作也一起卡"。
+    """
+    root = _resolve_workspace(root_path)
+    target = _resolve_rel(root, rel)
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail={"code": "invalid_path", "message": f"文件不存在:{rel}"})
+    if target.stat().st_size > READ_MAX_BYTES:
+        raise HTTPException(status_code=400, detail={"code": "file_too_large", "message": "文件超过 512KB,请让 Agent 自行读取"})
+    return {"content": _cached_read_text(target), "path": target.relative_to(root).as_posix()}
+
+
+def _list_files_by_root_sync(root_path: str, rel: str) -> dict:
+    return _list_files(_resolve_workspace(root_path), rel)
+
+
+async def _in_thread(fn, *args):
+    """把阻塞的文件系统操作放进线程池,不占事件循环。"""
+    return await to_thread.run_sync(fn, *args)
+
+
 @router.get("/browse")
 async def browse_directories(path: str = "") -> dict:
     """浏览服务器目录:path 为空返回起点(Windows 盘符 / Linux 根),否则返回子目录。"""
     if not path.strip():
-        roots = _list_roots()
-        return {"current": None, "parent": None, "roots": roots, "children": []}
-    return _browse_dir(path.strip())
+        return await _in_thread(lambda: {"current": None, "parent": None, "roots": _list_roots(), "children": []})
+    return await _in_thread(_browse_dir, path.strip())
 
 
 @router.get("/files")
@@ -232,7 +293,7 @@ async def list_files_by_path(
     user: User = Depends(get_current_user),
 ) -> dict:
     """按工作区绝对路径列出目录/文件(@ 选择)。供新对话(尚未创建会话)使用。"""
-    return _list_files(_resolve_workspace(workspace_path), path)
+    return await _in_thread(_list_files_by_root_sync, workspace_path, path)
 
 
 @router.get("/read")
@@ -242,14 +303,7 @@ async def read_file_by_path(
     user: User = Depends(get_current_user),
 ) -> dict:
     """按工作区绝对路径读取文件内容(@ 引用)。供新对话(尚未创建会话)使用。"""
-    root = _resolve_workspace(workspace_path)
-    target = _resolve_rel(root, path)
-    if not target.is_file():
-        raise HTTPException(status_code=400, detail={"code": "invalid_path", "message": f"文件不存在:{path}"})
-    if target.stat().st_size > 512 * 1024:
-        raise HTTPException(status_code=400, detail={"code": "file_too_large", "message": "文件超过 512KB,请让 Agent 自行读取"})
-    content = target.read_text(encoding="utf-8", errors="replace")
-    return {"content": content, "path": target.relative_to(root).as_posix()}
+    return await _in_thread(_read_workspace_file_sync, workspace_path, path)
 
 
 @router.get("/{conversation_id}/files")
@@ -263,7 +317,7 @@ async def list_workspace_files(
     conv = await _get_conversation_or_404(session, conversation_id, user.id)
     if not conv.workspace_path:
         raise HTTPException(status_code=400, detail={"code": "no_workspace", "message": "当前会话未设置工作区"})
-    return _list_files(_resolve_workspace(conv.workspace_path), path)
+    return await _in_thread(_list_files_by_root_sync, conv.workspace_path, path)
 
 
 @router.get("/{conversation_id}/read")
@@ -277,14 +331,97 @@ async def read_workspace_file(
     conv = await _get_conversation_or_404(session, conversation_id, user.id)
     if not conv.workspace_path:
         raise HTTPException(status_code=400, detail={"code": "no_workspace", "message": "当前会话未设置工作区"})
+    return await _in_thread(_read_workspace_file_sync, conv.workspace_path, path)
+
+
+# 侧栏终端:单条命令最长执行时间与输出上限(与 run_shell_command 同量级)
+EXEC_TIMEOUT = 60
+EXEC_OUTPUT_LIMIT = 200_000
+
+
+def _decode_tail(raw: bytes | None) -> str:
+    """子进程输出解码:优先 utf-8,中文 Windows 的 cmd 输出是 GBK,失败再退 replace。"""
+    if not raw:
+        return ""
+    for encoding in ("utf-8", "gbk"):
+        try:
+            return raw.decode(encoding)[-EXEC_OUTPUT_LIMIT:]
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", "replace")[-EXEC_OUTPUT_LIMIT:]
+
+
+def _kill_tree(proc: asyncio.subprocess.Process) -> None:
+    """超时后连子进程一起杀,避免留下后台进程。"""
+    try:
+        import psutil
+
+        for child in psutil.Process(proc.pid).children(recursive=True):
+            child.kill()
+    except Exception:  # noqa: BLE001  进程可能已退出
+        pass
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+
+
+@router.post("/{conversation_id}/exec")
+async def exec_in_workspace(
+    conversation_id: uuid.UUID,
+    body: ExecBody,
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """在会话工作区执行一条命令(侧栏终端,用户主动发起)。
+
+    与 `run_shell_command` 同一套底线:只读档位直接拒绝、cwd 限制在工作区内、
+    环境变量剔除 KEY/TOKEN/SECRET、超时杀进程树、输出截断。
+    这里不做模型侧的审批(命令是用户自己敲的),但档位门控保留 —— 否则"只读会话"
+    里靠终端就能绕过权限设置。
+    """
+    conv = await _get_conversation_or_404(session, conversation_id, user.id)
+    if conv.permission == "read_only":
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "permission_denied", "message": "当前会话是「只读」档位,不允许在工作区执行命令"},
+        )
+    if not conv.workspace_path:
+        raise HTTPException(status_code=400, detail={"code": "no_workspace", "message": "当前会话未设置工作区"})
     root = _resolve_workspace(conv.workspace_path)
-    target = _resolve_rel(root, path)
-    if not target.is_file():
-        raise HTTPException(status_code=400, detail={"code": "invalid_path", "message": f"文件不存在:{path}"})
-    if target.stat().st_size > 512 * 1024:
-        raise HTTPException(status_code=400, detail={"code": "file_too_large", "message": "文件超过 512KB,请让 Agent 自行读取"})
-    content = target.read_text(encoding="utf-8", errors="replace")
-    return {"content": content, "path": target.relative_to(root).as_posix()}
+    cwd = _resolve_rel(root, body.cwd or "")
+    if not cwd.is_dir():
+        raise HTTPException(status_code=400, detail={"code": "invalid_path", "message": f"目录不存在:{body.cwd}"})
+
+    from app.tools.shell import _scrub_env  # 复用同一套环境变量剔除规则
+
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            body.command,
+            cwd=str(cwd),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=_scrub_env(),
+        )
+    except OSError as e:
+        raise HTTPException(status_code=400, detail={"code": "exec_failed", "message": f"无法启动命令:{e}"})
+
+    timed_out = False
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=EXEC_TIMEOUT)
+    except asyncio.TimeoutError:
+        timed_out = True
+        _kill_tree(proc)
+        out, err = b"", f"命令执行超过 {EXEC_TIMEOUT} 秒,已终止".encode()
+
+    cwd_rel = cwd.relative_to(root).as_posix() if cwd != root else ""
+    return {
+        "exit_code": None if timed_out else proc.returncode,
+        "stdout": _decode_tail(out),
+        "stderr": _decode_tail(err),
+        "cwd": cwd_rel,
+        "timed_out": timed_out,
+    }
 
 
 @router.put("/{conversation_id}", response_model=ConversationOut)

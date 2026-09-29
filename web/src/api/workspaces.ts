@@ -63,6 +63,10 @@ export function listWorkspaceFilesByPath(workspacePath: string, path?: string): 
   return fetchJson<WorkspaceFilesResult>(`/api/workspaces/files?workspace_path=${encodeURIComponent(workspacePath)}${q}`)
 }
 
+// 说明:原来这里有个 execWorkspaceCommand(一条命令一次的 POST /exec)。侧栏终端改成
+// 真实 PTY 会话后就没人用了 —— 前端走 WebSocket(见 api/terminal.ts),后端那个端点
+// 仍在(供脚本/工具直接调用),只是不再是终端的实现方式。
+
 /** 读取工作区文件内容(按绝对路径,新对话尚未创建会话时使用) */
 export function readWorkspaceFileByPath(workspacePath: string, relPath: string): Promise<{ content: string; path: string }> {
   const q = `&path=${encodeURIComponent(relPath)}`

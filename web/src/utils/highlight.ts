@@ -5,8 +5,96 @@
  * token 配色由 styles/markdown.css 的 `.hljs-*` 规则提供(亮/暗双主题)。
  *
  * 所有返回值都是**已转义的 HTML**,可直接交给 v-html。
+ *
+ * 只注册下面这些真正用得到的语言,而不是 `import hljs from 'highlight.js'`:
+ * 全量入口会把 190+ 种语言一起打包(实测构建产物 1.3MB、dev 下浏览器要单独请求
+ * 380+ 个语言模块),而这里面绝大多数语言这个项目永远不会显示。
  */
-import hljs from 'highlight.js'
+import hljs from 'highlight.js/lib/core'
+
+import bash from 'highlight.js/lib/languages/bash'
+import c from 'highlight.js/lib/languages/c'
+import cpp from 'highlight.js/lib/languages/cpp'
+import csharp from 'highlight.js/lib/languages/csharp'
+import css from 'highlight.js/lib/languages/css'
+import diff from 'highlight.js/lib/languages/diff'
+import dockerfile from 'highlight.js/lib/languages/dockerfile'
+import go from 'highlight.js/lib/languages/go'
+import ini from 'highlight.js/lib/languages/ini'
+import java from 'highlight.js/lib/languages/java'
+import javascript from 'highlight.js/lib/languages/javascript'
+import json from 'highlight.js/lib/languages/json'
+import kotlin from 'highlight.js/lib/languages/kotlin'
+import less from 'highlight.js/lib/languages/less'
+import makefile from 'highlight.js/lib/languages/makefile'
+import markdown from 'highlight.js/lib/languages/markdown'
+import php from 'highlight.js/lib/languages/php'
+import plaintext from 'highlight.js/lib/languages/plaintext'
+import powershell from 'highlight.js/lib/languages/powershell'
+import python from 'highlight.js/lib/languages/python'
+import ruby from 'highlight.js/lib/languages/ruby'
+import rust from 'highlight.js/lib/languages/rust'
+import scss from 'highlight.js/lib/languages/scss'
+import sql from 'highlight.js/lib/languages/sql'
+import typescript from 'highlight.js/lib/languages/typescript'
+import xml from 'highlight.js/lib/languages/xml'
+import yaml from 'highlight.js/lib/languages/yaml'
+
+/**
+ * 注册表:键是 hljs 语言名,值是对应模块。
+ *
+ * 顺序有依赖关系(官方要求被依赖的先注册):xml ← html、css ← scss/less、
+ * javascript ← typescript ← tsx、c ← cpp。
+ */
+const LANGUAGES = {
+  plaintext,
+  bash,
+  c,
+  cpp,
+  csharp,
+  css,
+  diff,
+  dockerfile,
+  go,
+  ini,
+  java,
+  javascript,
+  json,
+  kotlin,
+  less,
+  makefile,
+  markdown,
+  php,
+  powershell,
+  python,
+  ruby,
+  rust,
+  scss,
+  sql,
+  typescript,
+  xml,
+  yaml,
+} as const
+
+for (const [name, language] of Object.entries(LANGUAGES)) {
+  hljs.registerLanguage(name, language)
+}
+
+/**
+ * 补充别名。
+ *
+ * 各语言模块自带常用别名(xml 已含 html、typescript 已含 ts/tsx、javascript 已含
+ * js/jsx/mjs/cjs、ini 已含 toml、bash 已含 sh/zsh),实测只有下面两个没人管:
+ * Markdown 代码块里常写的 ```shell,以及 ```vue。
+ */
+const EXTRA_ALIASES: Record<string, keyof typeof LANGUAGES> = {
+  shell: 'bash',
+  vue: 'xml',
+}
+for (const [alias, source] of Object.entries(EXTRA_ALIASES)) {
+  const language = LANGUAGES[source]
+  if (language) hljs.registerLanguage(alias, language)
+}
 
 /** 扩展名 → hljs 语言名(工具卡按文件路径推断语言) */
 const LANG_BY_EXT: Record<string, string> = {
